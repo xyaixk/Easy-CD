@@ -1,7 +1,6 @@
 package com.easy.cd.schedule;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.easy.cd.deploy.DeployService;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
 import com.easy.cd.entity.ReplicaStatus;
@@ -21,7 +20,10 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 副本状态定时刷新任务
@@ -39,9 +41,6 @@ public class ReplicaStatusRefreshTask {
     
     @Resource
     private ReplicaStatusMapper replicaStatusMapper;
-    
-    @Resource
-    private DeployService deployService;
     
     @Scheduled(fixedRate = 3000)
     public void refreshReplicaStatus() {
@@ -101,25 +100,43 @@ public class ReplicaStatusRefreshTask {
             DockerClient dockerClient = createDockerClientWithFailover(managerHosts);
             
             // 遍历每个服务，同步其副本状态
+            int successCount = 0;
+            int failCount = 0;
             for (AppService appService : services) {
                 try {
                     String serviceName = appService.getExternalServiceName() != null 
                         ? appService.getExternalServiceName()
                         : buildServiceName(appService.getName(), environment.getName());
-                    
+                                                    
                     // 查询服务的所有任务（Task）
                     List<Task> tasks = dockerClient.listTasksCmd()
                         .withServiceFilter(serviceName)
                         .exec();
-                    
-                    // 同步每个Task的状态（包括running和shutdown）
+                                                    
+                    // 先删除该服务的所有副本记录
+                    LambdaQueryWrapper<ReplicaStatus> deleteQuery = new LambdaQueryWrapper<>();
+                    deleteQuery.eq(ReplicaStatus::getServiceId, appService.getId());
+                    int deletedCount = replicaStatusMapper.delete(deleteQuery);
+                    if (deletedCount > 0) {
+                        log.debug("清理服务[{}]的 {} 条旧副本记录", appService.getName(), deletedCount);
+                    }
+                                                    
+                    // 同步每个Task的状态（重新插入新记录）
                     for (Task task : tasks) {
                         syncSingleReplicaStatus(dockerClient, appService.getId(), serviceName, task);
                     }
-                    
+                                                    
+                    successCount++;
                 } catch (Exception e) {
-                    log.error("同步服务[{}]副本状态失败", appService.getName(), e);
+                    failCount++;
+                    log.debug("同步服务[{}]副本状态失败", appService.getName(), e);
                 }
+            }
+            
+            // 汇总日志：只在有失败时打印一次
+            if (failCount > 0) {
+                log.warn("环境[{}]副本状态同步完成：成功{}个，失败{}个", 
+                    environment.getName(), successCount, failCount);
             }
             
         } catch (Exception e) {
@@ -171,55 +188,38 @@ public class ReplicaStatusRefreshTask {
             
             // 计算运行时间
             Long uptimeSeconds = null;
-            if (task.getStatus().getTimestamp() != null) {
+            // 对于failed状态的副本,不计算运行时间
+            if (taskState == TaskState.RUNNING && task.getStatus().getTimestamp() != null) {
                 try {
                     String timestamp = task.getStatus().getTimestamp();
                     uptimeSeconds = parseDockerTimestamp(timestamp);
+                    log.debug("Task[{}] status={}, timestamp={}, uptimeSeconds={}", 
+                            taskId, taskState, timestamp, uptimeSeconds);
                 } catch (Exception e) {
                     log.debug("计算运行时间失败: {}", e.getMessage());
                 }
             }
             
-            // 查询或创建副本状态记录
-            LambdaQueryWrapper<ReplicaStatus> query = new LambdaQueryWrapper<>();
-            query.eq(ReplicaStatus::getServiceId, serviceId)
-                .eq(ReplicaStatus::getReplicaId, taskId);
-            
-            ReplicaStatus existing = replicaStatusMapper.selectOne(query);
-            
-            if (existing != null) {
-                // 更新现有记录
-                existing.setStatus(taskState.name().toLowerCase());
-                existing.setNodeName(nodeHostname);
-                existing.setNodeIp(nodeIp);
-                existing.setContainerId(containerId);
-                existing.setContainerIdShort(containerId != null && containerId.length() > 12 
-                    ? containerId.substring(0, 12) : containerId);
-                existing.setUptimeSeconds(uptimeSeconds);
-                existing.setUpdatedTime(LocalDateTime.now());
-                replicaStatusMapper.updateById(existing);
-            } else {
-                // 创建新记录
-                ReplicaStatus replicaStatus = new ReplicaStatus();
-                replicaStatus.setServiceId(serviceId);
-                replicaStatus.setReplicaId(taskId);
-                replicaStatus.setReplicaName(replicaName);
-                replicaStatus.setReplicaIndex(slot);
-                replicaStatus.setPlatform("docker");
-                replicaStatus.setNodeName(nodeHostname);
-                replicaStatus.setNodeIp(nodeIp);
-                replicaStatus.setStatus(taskState.name().toLowerCase());
-                replicaStatus.setContainerId(containerId);
-                replicaStatus.setContainerIdShort(containerId != null && containerId.length() > 12 
-                    ? containerId.substring(0, 12) : containerId);
-                replicaStatus.setTaskId(taskId);
-                replicaStatus.setTaskSlot(slot);
-                replicaStatus.setUptimeSeconds(uptimeSeconds);
-                replicaStatus.setRestartCount(0);
-                replicaStatus.setCreatedTime(LocalDateTime.now());
-                replicaStatus.setUpdatedTime(LocalDateTime.now());
-                replicaStatusMapper.insert(replicaStatus);
-            }
+            // 直接创建新记录（因为前面已经删除了旧记录）
+            ReplicaStatus replicaStatus = new ReplicaStatus();
+            replicaStatus.setServiceId(serviceId);
+            replicaStatus.setReplicaId(taskId);
+            replicaStatus.setReplicaName(replicaName);
+            replicaStatus.setReplicaIndex(slot);
+            replicaStatus.setPlatform("docker");
+            replicaStatus.setNodeName(nodeHostname);
+            replicaStatus.setNodeIp(nodeIp);
+            replicaStatus.setStatus(taskState.name().toLowerCase());
+            replicaStatus.setContainerId(containerId);
+            replicaStatus.setContainerIdShort(containerId != null && containerId.length() > 12 
+                ? containerId.substring(0, 12) : containerId);
+            replicaStatus.setTaskId(taskId);
+            replicaStatus.setTaskSlot(slot);
+            replicaStatus.setUptimeSeconds(uptimeSeconds);
+            replicaStatus.setRestartCount(0);
+            replicaStatus.setCreatedTime(LocalDateTime.now());
+            replicaStatus.setUpdatedTime(LocalDateTime.now());
+            replicaStatusMapper.insert(replicaStatus);
             
         } catch (Exception e) {
             log.error("同步Task[{}]状态失败", task.getId(), e);
@@ -269,10 +269,10 @@ public class ReplicaStatusRefreshTask {
     }
     
     /**
-     * 构建服务名称
+     * 构建服务名称（直接使用服务名，不添加环境前缀）
      */
     private String buildServiceName(String serviceName, String environmentName) {
-        return serviceName + "_" + environmentName;
+        return serviceName.toLowerCase();
     }
     
     /**

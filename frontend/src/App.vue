@@ -173,7 +173,22 @@ const loadEnvironments = async () => {
     const data = await listEnvironments()
     environments.value = data
     if (data.length > 0) {
-      selectedEnv.value = data[0].id
+      // 尝试从 localStorage 读取上次选中的环境
+      const cachedEnvId = localStorage.getItem('selectedEnvId')
+      if (cachedEnvId) {
+        const envExists = data.find(e => e.id === parseInt(cachedEnvId))
+        if (envExists) {
+          selectedEnv.value = parseInt(cachedEnvId)
+        } else {
+          // 缓存的环境不存在,使用第一个环境
+          selectedEnv.value = data[0].id
+          localStorage.setItem('selectedEnvId', data[0].id)
+        }
+      } else {
+        // 没有缓存,使用第一个环境并缓存
+        selectedEnv.value = data[0].id
+        localStorage.setItem('selectedEnvId', data[0].id)
+      }
     }
   } catch (error) {
     console.error('加载环境列表失败:', error)
@@ -297,9 +312,13 @@ const stopAutoRefresh = () => {
   }
 }
 
-// 监听环境切换，重新加载服务列表
-watch(selectedEnv, () => {
+// 监听环境切换，重新加载服务列表并缓存选中的环境
+watch(selectedEnv, (newEnvId) => {
   loadServices()
+  // 缓存选中的环境ID
+  if (newEnvId) {
+    localStorage.setItem('selectedEnvId', newEnvId)
+  }
 })
 
 // 页面加载时获取环境列表和服务列表

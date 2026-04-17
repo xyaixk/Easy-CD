@@ -4,6 +4,7 @@ import com.easy.cd.dto.ImageVersionDTO;
 import com.easy.cd.dto.ServiceCreateDTO;
 import com.easy.cd.dto.ServiceUpdateDTO;
 import com.easy.cd.vo.ServiceDetailVO;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -66,4 +67,14 @@ public interface ServiceManagementService {
      * 获取服务镜像的所有可用版本（从镜像仓库）
      */
     List<ImageVersionDTO> getAvailableVersions(Long serviceId);
+    
+    /**
+     * 流式推送副本日志（SSE）
+     * @param serviceId 服务ID
+     * @param replicaId 副本ID（容器ID）
+     * @param tail 获取最后N行
+     * @param follow 是否持续推送
+     * @return SseEmitter
+     */
+    SseEmitter streamLogs(Long serviceId, String replicaId, Integer tail, Boolean follow);
 }

@@ -9,7 +9,9 @@ import com.easy.cd.service.ServiceManagementService;
 import com.easy.cd.vo.ServiceDetailVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -148,5 +150,21 @@ public class ServiceController {
         log.info("获取服务可用版本, id: {}", id);
         List<ImageVersionDTO> versions = serviceManagementService.getAvailableVersions(id);
         return Result.success(versions);
+    }
+    
+    /**
+     * 查看服务日志（SSE流式传输）
+     * @param serviceId 服务ID
+     * @param tail 获取最后N行，默认500行
+     * @param follow 是否持续推送新日志，默认false
+     */
+    @GetMapping(value = "/{serviceId}/logs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamLogs(
+            @PathVariable Long serviceId,
+            @RequestParam(defaultValue = "500") Integer tail,
+            @RequestParam(defaultValue = "false") Boolean follow) {
+        log.info("查看服务日志, serviceId: {}, tail: {}, follow: {}", 
+                serviceId, tail, follow);
+        return serviceManagementService.streamLogs(serviceId, null, tail, follow);
     }
 }

@@ -154,7 +154,8 @@ const parseEnvVars = (envVarsStr) => {
 
 // 复制示例参数
 const copyExampleParams = () => {
-  const exampleParams = `JAVA_OPTS=-Xmx2g -Xms1g -XX:+UseG1GC
+  const exampleParams = `# 环境变量
+JAVA_OPTS=-Xmx2g -Xms1g -XX:+UseG1GC
 SPRING_PROFILES_ACTIVE=prod
 SERVER_PORT=8080
 TZ=Asia/Shanghai
@@ -163,12 +164,29 @@ DATABASE_USERNAME=root
 DATABASE_PASSWORD=password
 REDIS_HOST=redis
 REDIS_PORT=6379
+
+# Docker 基础配置
 restart=always
 publish=8080:8080
 publish=9090:9090
 cpus=2.0
 memory=4G
-memory-reservation=2G`
+memory-reservation=2G
+network=overlay
+
+# HealthCheck 健康检查配置
+healthcheck=curl -f http://localhost:8080/actuator/health || exit 1
+healthcheck_interval=10s
+healthcheck_timeout=5s
+healthcheck_retries=3
+healthcheck_start_period=30s
+
+# 滚动更新配置
+update_parallelism=1
+update_delay=10s
+update_monitor=60s
+update_failure_action=pause
+update_order=start-first`
   
   formData.value.dockerParams = exampleParams
 }

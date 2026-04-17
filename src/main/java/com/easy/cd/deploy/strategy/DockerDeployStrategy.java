@@ -29,22 +29,70 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.*;
 
 /**
  * Docker Swarm 部署策略实现
+ */
+/**
+ * Docker Swarm 部署策略实现。
+ *
+ * <p>职责概览：</p>
+ * <ul>
+ *   <li>根据环境配置连接 Swarm Manager，并在多个 Manager 之间做故障切换。</li>
+ *   <li>完成服务的创建、更新、回滚、扩缩容、停止/删除等生命周期操作。</li>
+ *   <li>解析/拼装镜像名称、服务名称、Docker 参数并同步数据库中的服务元数据。</li>
+ *   <li>收集服务状态、日志与基础监控信息（部分指标预留实现）。</li>
+ * </ul>
+ *
+ * <p>关键依赖：</p>
+ * <ul>
+ *   <li>{@link EnvironmentMapper}：读取环境配置（Swarm Manager 地址、Registry 等）。</li>
+ *   <li>{@link ServiceMapper}：更新服务的版本与镜像信息。</li>
+ *   <li>Docker Java Client：执行 Swarm Service 的各类操作。</li>
+ * </ul>
+ *
+ * <p>异常处理：</p>
+ * <ul>
+ *   <li>所有对外方法均捕获异常并返回失败结果，避免上层出现未处理异常。</li>
+ *   <li>关键步骤写入日志，便于故障排查与审计。</li>
+ * </ul>
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class DockerDeployStrategy implements DeployStrategy {
     
+    // 环境配置数据源：读取 Swarm Manager 列表、Registry 地址等
     private final EnvironmentMapper environmentMapper;
+
+    // 服务数据源：用于回滚/更新时同步数据库中的镜像与版本
     private final ServiceMapper serviceMapper;
+
+    // 随机数用于从多个 Manager 地址中选择入口
     private final Random random = new Random();
+
+    // 访问 Registry API 或外部 HTTP 服务的客户端
     private final RestTemplate restTemplate = new RestTemplate();
     
+    /**
+     * 部署或更新 Docker Swarm 服务。
+     *
+     * <p>核心流程：</p>
+     * <ol>
+     *   <li>读取环境配置并解析 Swarm Manager 列表与 Registry 地址。</li>
+     *   <li>连接可用的 Manager 节点（带故障切换）。</li>
+     *   <li>拼装完整镜像名与服务名，并解析 Docker 参数。</li>
+     *   <li>服务存在则更新，不存在则创建。</li>
+     *   <li>读取服务真实镜像与副本数，返回部署结果。</li>
+     * </ol>
+     *
+     * @param request 部署请求（包含服务名、镜像、参数、环境等）
+     * @return 部署结果，失败时包含错误信息
+     */
     @Override
     public DeployResult deploy(DeployRequest request) {
         log.info("开始Docker部署: {}", request.getServiceName());
@@ -76,10 +124,6 @@ public class DockerDeployStrategy implements DeployStrategy {
                 : Collections.emptyMap();
             
             String serviceName = buildServiceName(request.getServiceName(), environment.getName());
-            
-            // 自动创建网络（如果不存在）
-            String networkName = buildNetworkName(environment.getName(), "overlay");
-            ensureNetworkExists(dockerClient, networkName);
             
             // 检查服务是否已存在（更新 or 创建）
             boolean serviceExists = checkServiceExists(dockerClient, serviceName);
@@ -121,6 +165,18 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
     }
     
+    /**
+     * 停止服务（在 Swarm 中删除 Service，但保留数据库记录）。
+     *
+     * <p>实现细节：</p>
+     * <ul>
+     *   <li>优先使用数据库中的 externalServiceName；为空时按命名规则重建。</li>
+     *   <li>删除 Swarm Service，相当于停止所有副本。</li>
+     * </ul>
+     *
+     * @param serviceId 服务 ID
+     * @return 停止结果
+     */
     @Override
     public DeployResult stop(Long serviceId) {
         log.info("停止Docker服务: {}", serviceId);
@@ -163,6 +219,15 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
     }
     
+    /**
+     * 重启服务。
+     *
+     * <p>当服务已被删除时，会按原参数重新部署；否则通过递增
+     * {@code forceUpdate} 触发 Swarm 滚动重启。</p>
+     *
+     * @param serviceId 服务 ID
+     * @return 重启结果
+     */
     @Override
     public DeployResult restart(Long serviceId) {
         log.info("重启Docker服务: {}", serviceId);
@@ -248,6 +313,19 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
     }
     
+    /**
+     * 回滚服务到指定镜像版本。
+     *
+     * <p>实现细节：</p>
+     * <ul>
+     *   <li>根据目标版本替换镜像 Tag 并更新 Swarm Service。</li>
+     *   <li>同步数据库中的镜像地址与版本字段。</li>
+     * </ul>
+     *
+     * @param serviceId 服务 ID
+     * @param targetVersion 目标版本（镜像 Tag）
+     * @return 回滚结果
+     */
     @Override
     public DeployResult rollback(Long serviceId, String targetVersion) {
         log.info("回滚Docker服务: {} 到版本: {}", serviceId, targetVersion);
@@ -287,7 +365,25 @@ public class DockerDeployStrategy implements DeployStrategy {
             log.info("回滚镜像: {} -> {}", currentImage, newImage);
             
             // 更新镜像
-            spec.getTaskTemplate().getContainerSpec().withImage(newImage);
+            ContainerSpec containerSpec = spec.getTaskTemplate().getContainerSpec();
+            containerSpec.withImage(newImage);
+            
+            // 解析 dockerParams 以获取 HealthCheck 和 UpdateConfig 配置
+            Map<String, Object> dockerParams = appService.getDockerParams() != null 
+                ? parseConfig(appService.getDockerParams()) 
+                : Collections.emptyMap();
+            
+            // 重新应用 HealthCheck 配置（如果存在）
+            applyHealthCheck(containerSpec, dockerParams);
+            
+            // 重新应用 UpdateConfig 配置（如果存在）
+            applyUpdateConfig(spec, dockerParams);
+            
+            // 递增 ForceUpdate 以触发滚动更新
+            TaskSpec taskSpec = spec.getTaskTemplate();
+            Integer currentForceUpdate = taskSpec.getForceUpdate();
+            Integer newForceUpdate = (currentForceUpdate != null ? currentForceUpdate : 0) + 1;
+            taskSpec.withForceUpdate(newForceUpdate);
             
             dockerClient.updateServiceCmd(serviceName, spec)
                 .withVersion(version)
@@ -298,7 +394,7 @@ public class DockerDeployStrategy implements DeployStrategy {
             appService.setDockerImage(newImage);
             serviceMapper.updateById(appService);
             
-            log.info("Docker服务已回滚: {} 到版本: {}", serviceName, targetVersion);
+            log.info("Docker服务已回滚: {} 到版本: {} (ForceUpdate={})", serviceName, targetVersion, newForceUpdate);
             return DeployResult.success("服务已回滚到版本: " + targetVersion);
         } catch (Exception e) {
             log.error("回滚Docker服务失败", e);
@@ -329,6 +425,13 @@ public class DockerDeployStrategy implements DeployStrategy {
         return imageWithoutTag + ":" + newTag;
     }
     
+    /**
+     * 调整服务副本数（扩/缩容）。
+     *
+     * @param serviceId 服务 ID
+     * @param replicas 目标副本数
+     * @return 扩缩容结果
+     */
     @Override
     public DeployResult scale(Long serviceId, Integer replicas) {
         log.info("调整Docker服务副本数: {} -> {}", serviceId, replicas);
@@ -376,6 +479,14 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
     }
     
+    /**
+     * 删除服务（从 Swarm 中移除 Service）。
+     *
+     * <p>与 {@link #stop(Long)} 类似，但语义上表示彻底删除。</p>
+     *
+     * @param serviceId 服务 ID
+     * @return 删除结果
+     */
     @Override
     public DeployResult delete(Long serviceId) {
         log.info("删除Docker服务: {}", serviceId);
@@ -414,6 +525,14 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
     }
     
+    /**
+     * 查询服务状态。
+     *
+     * <p>从 Swarm 获取服务详情与任务列表并换算成统一状态字段。</p>
+     *
+     * @param serviceId 服务 ID
+     * @return 状态结果（包含运行/健康/期望副本数）
+     */
     @Override
     public DeployResult getStatus(Long serviceId) {
         log.info("获取Docker服务状态: {}", serviceId);
@@ -427,6 +546,11 @@ public class DockerDeployStrategy implements DeployStrategy {
                 .build();
     }
     
+    /**
+     * 返回部署类型标识（用于前端/上层区分策略）。
+     *
+     * @return 部署类型字符串
+     */
     @Override
     public String getDeployType() {
         return "docker";
@@ -537,6 +661,36 @@ public class DockerDeployStrategy implements DeployStrategy {
      * 构建网络名称（环境-网络类型）
      * 例如：dev-overlay, prod-overlay
      */
+    /**
+     * 获取网络模式
+     * 优先级: Docker参数 > 环境配置 > 默认(overlay)
+     */
+    private String getNetworkMode(Map<String, Object> dockerParams, Environment environment) {
+        // 1. 优先使用 Docker 参数中指定的网络模式
+        if (dockerParams != null && dockerParams.containsKey("network")) {
+            String network = dockerParams.get("network").toString();
+            log.info("使用 Docker 参数指定的网络模式: {}", network);
+            return network;
+        }
+        
+        // 2. 其次使用环境配置中的默认网络模式
+        if (environment != null && environment.getConfig() != null) {
+            Map<String, Object> envConfig = parseConfig(environment.getConfig());
+            if (envConfig.containsKey("networkMode")) {
+                String network = envConfig.get("networkMode").toString();
+                log.info("使用环境配置的网络模式: {}", network);
+                return network;
+            }
+        }
+        
+        // 3. 默认使用 overlay 网络
+        log.info("使用默认网络模式: overlay");
+        return "overlay";
+    }
+    
+    /**
+     * 构建网络名称
+     */
     private String buildNetworkName(String envName, String networkType) {
         return envName.toLowerCase() + "-" + networkType.toLowerCase();
     }
@@ -605,29 +759,56 @@ public class DockerDeployStrategy implements DeployStrategy {
         // 应用重启策略
         applyRestartPolicy(taskSpec, dockerParams);
         
+        // 应用 HealthCheck
+        applyHealthCheck(containerSpec, dockerParams);
+        
         // 设置副本数
         Integer replicas = request.getReplicas() != null ? request.getReplicas() : 1;
         ServiceModeConfig modeConfig = new ServiceModeConfig()
             .withReplicated(new ServiceReplicatedModeOptions()
                 .withReplicas(replicas));
         
-        // 设置网络
+        // 设置网络 - 根据参数决定使用 overlay 还是 host 模式
         Environment environment = environmentMapper.selectById(request.getEnvironmentId());
-        String networkName = buildNetworkName(environment.getName(), "overlay");
+        String networkMode = getNetworkMode(dockerParams, environment);
         
-        List<NetworkAttachmentConfig> networks = new ArrayList<>();
-        networks.add(new NetworkAttachmentConfig().withTarget(networkName));
-        log.info("服务将连接到网络: {}", networkName);
-        
-        // 组装ServiceSpec
-        ServiceSpec serviceSpec = new ServiceSpec()
-            .withName(serviceName)
-            .withTaskTemplate(taskSpec)
-            .withMode(modeConfig)
-            .withNetworks(networks);
+        ServiceSpec serviceSpec;
+        if ("host".equalsIgnoreCase(networkMode)) {
+            // Host 网络模式 - 使用 host 网络
+            log.info("使用 host 网络模式");
+            List<NetworkAttachmentConfig> networks = new ArrayList<>();
+            networks.add(new NetworkAttachmentConfig().withTarget("host"));
+            
+            // 网络配置需要在 TaskSpec 中设置
+            taskSpec.withNetworks(networks);
+            
+            serviceSpec = new ServiceSpec()
+                .withName(serviceName)
+                .withTaskTemplate(taskSpec)
+                .withMode(modeConfig);
+        } else {
+            // Overlay 网络模式（默认）
+            String networkName = buildNetworkName(environment.getName(), "overlay");
+            ensureNetworkExists(dockerClient, networkName);
+            
+            List<NetworkAttachmentConfig> networks = new ArrayList<>();
+            networks.add(new NetworkAttachmentConfig().withTarget(networkName));
+            log.info("使用 overlay 网络: {}", networkName);
+            
+            // 网络配置需要在 TaskSpec 中设置
+            taskSpec.withNetworks(networks);
+            
+            serviceSpec = new ServiceSpec()
+                .withName(serviceName)
+                .withTaskTemplate(taskSpec)
+                .withMode(modeConfig);
+        }
         
         // 应用端口发布
         applyPortPublishing(serviceSpec, dockerParams);
+        
+        // 应用 UpdateConfig（滚动更新策略）
+        applyUpdateConfig(serviceSpec, dockerParams);
         
         // 执行创建
         CreateServiceCmd cmd = dockerClient.createServiceCmd(serviceSpec);
@@ -829,7 +1010,156 @@ public class DockerDeployStrategy implements DeployStrategy {
                key.equals("memory") || 
                key.equals("memory-reservation") || 
                key.equals("restart") || 
-               key.equals("publish");
+               key.equals("publish") ||
+               key.equals("network") ||  // 支持网络模式参数
+               // HealthCheck 参数
+               key.equals("healthcheck") ||
+               key.equals("healthcheck_interval") ||
+               key.equals("healthcheck_timeout") ||
+               key.equals("healthcheck_retries") ||
+               key.equals("healthcheck_start_period") ||
+               // UpdateConfig 参数
+               key.equals("update_parallelism") ||
+               key.equals("update_delay") ||
+               key.equals("update_monitor") ||
+               key.equals("update_failure_action") ||
+               key.equals("update_order");
+    }
+    
+    /**
+     * 应用 HealthCheck 配置
+     */
+    private void applyHealthCheck(ContainerSpec containerSpec, Map<String, Object> dockerParams) {
+        if (dockerParams == null || !dockerParams.containsKey("healthcheck")) {
+            return;
+        }
+        
+        String healthCmd = dockerParams.get("healthcheck").toString();
+        
+        HealthCheck healthCheck = new HealthCheck()
+            .withTest(Arrays.asList("CMD-SHELL", healthCmd))
+            .withInterval(parseDuration(dockerParams.getOrDefault("healthcheck_interval", "10s").toString()))
+            .withTimeout(parseDuration(dockerParams.getOrDefault("healthcheck_timeout", "5s").toString()))
+            .withRetries(parseInt(dockerParams.getOrDefault("healthcheck_retries", 3)))
+            .withStartPeriod(parseDuration(dockerParams.getOrDefault("healthcheck_start_period", "30s").toString()));
+        
+        containerSpec.withHealthCheck(healthCheck);
+        log.info("应用 HealthCheck: 命令={}, 间隔={}ns, 超时={}ns, 重试={}, 启动期={}ns", 
+            healthCmd, healthCheck.getInterval(), healthCheck.getTimeout(), 
+            healthCheck.getRetries(), healthCheck.getStartPeriod());
+    }
+    
+    /**
+     * 应用 UpdateConfig 配置（滚动更新策略）
+     */
+    private void applyUpdateConfig(ServiceSpec serviceSpec, Map<String, Object> dockerParams) {
+        if (dockerParams == null) {
+            return;
+        }
+        
+        // 检查是否有 UpdateConfig 相关参数
+        boolean hasUpdateConfig = dockerParams.containsKey("update_parallelism") ||
+                                  dockerParams.containsKey("update_delay") ||
+                                  dockerParams.containsKey("update_monitor") ||
+                                  dockerParams.containsKey("update_failure_action") ||
+                                  dockerParams.containsKey("update_order");
+        
+        if (!hasUpdateConfig) {
+            return;
+        }
+        
+        // 解析 failureAction
+        String failureActionStr = dockerParams.getOrDefault("update_failure_action", "pause").toString().toLowerCase();
+        UpdateFailureAction failureAction;
+        switch (failureActionStr) {
+            case "continue":
+                failureAction = UpdateFailureAction.CONTINUE;
+                break;
+            case "rollback":
+                failureAction = UpdateFailureAction.ROLLBACK;
+                break;
+            case "pause":
+            default:
+                failureAction = UpdateFailureAction.PAUSE;
+                break;
+        }
+        
+        // 解析 order
+        String orderStr = dockerParams.getOrDefault("update_order", "stop-first").toString().toLowerCase();
+        UpdateOrder order;
+        switch (orderStr) {
+            case "start-first":
+                order = UpdateOrder.START_FIRST;
+                break;
+            case "stop-first":
+            default:
+                order = UpdateOrder.STOP_FIRST;
+                break;
+        }
+        
+        UpdateConfig updateConfig = new UpdateConfig()
+            .withParallelism(parseInt(dockerParams.getOrDefault("update_parallelism", 1)))
+            .withDelay(parseDuration(dockerParams.getOrDefault("update_delay", "0s").toString()))
+            .withMonitor(parseDuration(dockerParams.getOrDefault("update_monitor", "0s").toString()))
+            .withFailureAction(failureAction)
+            .withOrder(order);
+        
+        serviceSpec.withUpdateConfig(updateConfig);
+        log.info("应用 UpdateConfig: parallelism={}, delay={}ns, monitor={}ns, failureAction={}, order={}",
+            updateConfig.getParallelism(), updateConfig.getDelay(), updateConfig.getMonitor(),
+            updateConfig.getFailureAction(), updateConfig.getOrder());
+    }
+    
+    /**
+     * 解析时间字符串为纳秒（支持 s, m, h）
+     * 例如：10s -> 10000000000, 1m -> 60000000000
+     */
+    private Long parseDuration(String duration) {
+        if (duration == null || duration.isEmpty()) {
+            return 0L;
+        }
+        
+        duration = duration.trim().toLowerCase();
+        
+        try {
+            if (duration.endsWith("h")) {
+                long hours = Long.parseLong(duration.replace("h", "").trim());
+                return hours * 60 * 60 * 1_000_000_000L;
+            } else if (duration.endsWith("m")) {
+                long minutes = Long.parseLong(duration.replace("m", "").trim());
+                return minutes * 60 * 1_000_000_000L;
+            } else if (duration.endsWith("s")) {
+                long seconds = Long.parseLong(duration.replace("s", "").trim());
+                return seconds * 1_000_000_000L;
+            } else if (duration.endsWith("ms")) {
+                long millis = Long.parseLong(duration.replace("ms", "").trim());
+                return millis * 1_000_000L;
+            } else {
+                // 默认按秒处理
+                return Long.parseLong(duration) * 1_000_000_000L;
+            }
+        } catch (NumberFormatException e) {
+            log.warn("解析时间格式失败: {}, 使用默认值0", duration);
+            return 0L;
+        }
+    }
+    
+    /**
+     * 解析整数值（支持 String 和 Number 类型）
+     */
+    private Integer parseInt(Object value) {
+        if (value == null) {
+            return 0;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).intValue();
+        }
+        try {
+            return Integer.parseInt(value.toString());
+        } catch (NumberFormatException e) {
+            log.warn("解析整数失败: {}, 使用默认值0", value);
+            return 0;
+        }
     }
     
     /**
@@ -875,6 +1205,9 @@ public class DockerDeployStrategy implements DeployStrategy {
         // 应用重启策略
         applyRestartPolicy(taskSpec, dockerParams);
         
+        // 应用 HealthCheck
+        applyHealthCheck(containerSpec, dockerParams);
+        
         // 步骤4: 递增 ForceUpdate 以确保触发滚动更新
         Integer currentForceUpdate = taskSpec.getForceUpdate();
         Integer newForceUpdate = (currentForceUpdate != null ? currentForceUpdate : 0) + 1;
@@ -887,6 +1220,9 @@ public class DockerDeployStrategy implements DeployStrategy {
         
         // 应用端口发布
         applyPortPublishing(spec, dockerParams);
+        
+        // 应用 UpdateConfig（滚动更新策略）
+        applyUpdateConfig(spec, dockerParams);
         
         // 步骤6: 执行更新
         dockerClient.updateServiceCmd(serviceName, spec)
@@ -923,6 +1259,12 @@ public class DockerDeployStrategy implements DeployStrategy {
      * 3. 默认返回 latest
      */
     @Override
+    /**
+     * 从镜像地址中解析版本号（Tag 或 Digest）。
+     *
+     * @param dockerImage 镜像地址（可能包含 Tag 或 Digest）
+     * @return 解析出的版本号；无法解析时返回 null
+     */
     public String extractVersionFromImage(String dockerImage) {
         if (dockerImage == null || dockerImage.trim().isEmpty()) {
             return "latest";
@@ -964,12 +1306,31 @@ public class DockerDeployStrategy implements DeployStrategy {
      * API文档: https://docs.docker.com/registry/spec/api/
      */
     @Override
-    public List<ImageVersionDTO> getAvailableVersions(String dockerImage) {
+    /**
+     * 获取镜像可用版本列表。
+     *
+     * <p>优先使用环境配置中的 registryUrl，如果没有则根据镜像地址解析 Registry。</p>
+     *
+     * @param dockerImage 镜像地址
+     * @param registryUrl 环境配置中的镜像仓库地址（优先级高于镜像名称中的地址）
+     * @return 版本列表（按时间倒序/Registry 返回顺序）
+     */
+    public List<ImageVersionDTO> getAvailableVersions(String dockerImage, String registryUrl) {
         List<ImageVersionDTO> versions = new ArrayList<>();
         
         try {
             // Step 1: 解析镜像名称，提取仓库地址和镜像名
             ImageInfo imageInfo = parseImageName(dockerImage);
+            
+            // 优先使用环境配置中的 registryUrl
+            if (registryUrl != null && !registryUrl.isEmpty()) {
+                // 确保 registryUrl 有协议前缀
+                if (!registryUrl.startsWith("http://") && !registryUrl.startsWith("https://")) {
+                    registryUrl = "https://" + registryUrl;
+                }
+                imageInfo.setRegistryUrl(registryUrl);
+                log.info("使用环境配置中的 registryUrl: {}", registryUrl);
+            }
             
             log.info("解析镜像信息: dockerImage={}, registryUrl={}, imageName={}", 
                 dockerImage, imageInfo.getRegistryUrl(), imageInfo.getImageName());
@@ -1142,6 +1503,16 @@ public class DockerDeployStrategy implements DeployStrategy {
     /**
      * 收集环境下所有服务的状态信息
      */
+    /**
+     * 收集环境下所有服务的状态信息。
+     *
+     * <p>对每个服务执行单独的状态查询；若服务不存在或查询失败，
+     * 以 stopped 状态返回，保证调用方能得到完整列表。</p>
+     *
+     * @param environment 环境信息（包含 Swarm 配置）
+     * @param services 服务列表
+     * @return 服务状态列表（与输入服务一一对应）
+     */
     public List<ServiceStatusInfo> collectServiceStatus(Environment environment, List<AppService> services) {
         List<ServiceStatusInfo> statusList = new ArrayList<>();
         
@@ -1163,13 +1534,17 @@ public class DockerDeployStrategy implements DeployStrategy {
             DockerClient dockerClient = createDockerClientWithFailover(managerHosts);
             
             // 查询每个服务的状态
+            int successCount = 0;
+            int failCount = 0;
             for (AppService appService : services) {
                 try {
                     String serviceName = buildServiceName(appService.getName(), environment.getName());
                     ServiceStatusInfo statusInfo = collectSingleServiceStatus(dockerClient, appService.getId(), serviceName);
                     statusList.add(statusInfo);
+                    successCount++;
                 } catch (Exception e) {
-                    log.error("收集服务[{}]状态失败", appService.getName(), e);
+                    failCount++;
+                    log.debug("收集服务[{}]状态失败", appService.getName(), e);
                     // 服务不存在或异常，返回stopped状态
                     statusList.add(ServiceStatusInfo.builder()
                         .serviceId(appService.getId())
@@ -1180,6 +1555,12 @@ public class DockerDeployStrategy implements DeployStrategy {
                         .desiredInstances(0)
                         .build());
                 }
+            }
+            
+            // 汇总日志：只在有失败时打印一次
+            if (failCount > 0) {
+                log.warn("环境[{}]服务状态收集完成：成功{}个，失败{}个", 
+                    environment.getName(), successCount, failCount);
             }
             
         } catch (Exception e) {
@@ -1278,6 +1659,15 @@ public class DockerDeployStrategy implements DeployStrategy {
     
     /**
      * 收集环境下所有服务的监控指标
+     */
+    /**
+     * 收集环境下所有服务的监控指标。
+     *
+     * <p>目前仅提供接口占位，真实指标采集逻辑待补充。</p>
+     *
+     * @param environment 环境信息
+     * @param services 服务列表
+     * @return 监控指标列表
      */
     public List<ServiceMetricsInfo> collectServiceMetrics(Environment environment, List<AppService> services) {
         // TODO: 后续实现真实的监控指标收集逻辑
@@ -1444,6 +1834,123 @@ public class DockerDeployStrategy implements DeployStrategy {
             return null;
         }
     }
+    
+    /**
+     * 流式推送服务聚合日志（SSE） - 在Manager节点查询所有副本的聚合日志
+     */
+    /**
+     * 通过 SSE 流式推送服务聚合日志（在 Manager 节点查询）。
+     *
+     * <p>说明：</p>
+     * <ul>
+     *   <li>日志查询使用 Service ID，避免名称冲突。</li>
+     *   <li>支持 tail（仅拉取最近 N 行）与 follow（持续跟随）。</li>
+     * </ul>
+     *
+     * @param environment 环境信息（含 Manager 列表）
+     * @param serviceName 服务名称
+     * @param tail 仅返回最近 N 行（可为空）
+     * @param follow 是否持续跟随
+     * @return SSE emitter
+     */
+    @Override
+    public SseEmitter streamServiceLogs(Environment environment, String serviceName, Integer tail, Boolean follow) {
+        log.info("开始获取服务日志: serviceName={}, tail={}, follow={}, environmentId={}", 
+                serviceName, tail, follow, environment.getId());
+        
+        // 初始化SseEmitter，设置超时时间（30分钟）
+        SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
+        
+        // 异步推送日志
+        new Thread(() -> {
+            DockerClient dockerClient = null;
+            try {
+                // 直接使用传入的Environment对象
+                Map<String, Object> config = parseConfig(environment.getConfig());
+                List<String> managerHosts = (List<String>) config.get("swarmManagerHosts");
+                
+                if (managerHosts == null || managerHosts.isEmpty()) {
+                    emitter.completeWithError(new RuntimeException("Swarm Manager地址未配置"));
+                    return;
+                }
+                
+                // 连接到Swarm Manager - Service日志可以在Manager节点查询
+                dockerClient = createDockerClientWithFailover(managerHosts);
+                
+                // 查询服务信息,获取服务ID
+                com.github.dockerjava.api.model.Service dockerService = null;
+                try {
+                    dockerService = dockerClient.inspectServiceCmd(serviceName).exec();
+                } catch (Exception e) {
+                    log.error("查询服务失败: {}", serviceName, e);
+                    emitter.completeWithError(new RuntimeException("服务不存在: " + serviceName));
+                    return;
+                }
+                
+                // 使用服务ID而不是服务名查询日志
+                String serviceId = dockerService.getId();
+                
+                // 构建Service日志命令 - 使用服务ID
+                com.github.dockerjava.api.command.LogSwarmObjectCmd logCmd = dockerClient.logServiceCmd(serviceId)
+                    .withStdout(true)
+                    .withStderr(true)
+                    .withTimestamps(true)
+                    .withFollow(follow);
+                
+                // 设置获取最后N行 - 限制最大1000行，防止日志过多导致内存溢出
+                int effectiveTail = (tail != null && tail > 0) ? Math.min(tail, 1000) : 100;
+                logCmd.withTail(effectiveTail);
+                
+                // 执行日志命令，异步推送
+                logCmd.exec(new ResultCallback.Adapter<Frame>() {
+                    @Override
+                    public void onNext(Frame frame) {
+                        try {
+                            String logLine = new String(frame.getPayload()).trim();
+                            if (!logLine.isEmpty()) {
+                                // 通过SSE发送日志
+                                emitter.send(SseEmitter.event()
+                                    .data(logLine)
+                                    .name("log"));
+                            }
+                        } catch (IOException e) {
+                            log.error("发送日志失败", e);
+                            try {
+                                emitter.completeWithError(e);
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                    
+                    @Override
+                    public void onComplete() {
+                        log.info("服务日志流结束: {}", serviceName);
+                        emitter.complete();
+                    }
+                    
+                    @Override
+                    public void onError(Throwable throwable) {
+                        log.error("服务日志流错误", throwable);
+                        emitter.completeWithError(throwable);
+                    }
+                });
+                
+            } catch (Exception e) {
+                log.error("获取服务日志失败", e);
+                emitter.completeWithError(e);
+            }
+        }).start();
+        
+        // 设置超时和完成回调
+        emitter.onTimeout(() -> {
+            log.info("服务日志流超时: {}", serviceName);
+            emitter.complete();
+        });
+        
+        emitter.onCompletion(() -> {
+            log.info("服务日志流完成: {}", serviceName);
+        });
+        
+        return emitter;
+    }
 }
-
-

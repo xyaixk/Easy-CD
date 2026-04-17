@@ -1,6 +1,7 @@
 <script setup>
 import { ref, watch, onUnmounted } from 'vue'
 import { getServiceReplicas } from '@/api/service'
+import LogViewerDialog from './LogViewerDialog.vue'
 
 const props = defineProps({
   visible: {
@@ -17,6 +18,10 @@ const emit = defineEmits(['update:visible'])
 
 // 副本列表数据
 const replicas = ref([])
+
+// 日志查看对话框
+const showLogViewer = ref(false)
+const selectedReplica = ref(null)
 
 // 定时刷新相关
 let refreshTimer = null
@@ -122,18 +127,20 @@ const getStatusText = (status) => {
   return statusMap[status] || status
 }
 
-// 查看日志
-const handleViewLogs = (replica) => {
-  console.log('查看日志:', replica)
-  // TODO: 实现日志查看功能
-  alert(`查看副本 ${replica.name} 的日志\n容器ID: ${replica.containerId || '-'}`)
+// 查看服务日志
+const handleViewServiceLogs = () => {
+  console.log('查看服务日志:', props.service)
+  selectedReplica.value = { name: props.service.name } // 用于日志对话框标题
+  showLogViewer.value = true
 }
 
-// 进入容器
+// 副本操作按钮（暂无功能）
+const handleViewLogs = (replica) => {
+  console.log('副本日志功能暂未开放:', replica)
+}
+
 const handleEnterContainer = (replica) => {
-  console.log('进入容器:', replica)
-  // TODO: 实现容器终端功能
-  alert(`进入副本 ${replica.name} 的容器\n容器ID: ${replica.containerId || '-'}`)
+  console.log('进入容器功能暂未开放:', replica)
 }
 
 onUnmounted(() => {
@@ -184,6 +191,18 @@ onUnmounted(() => {
                 <span class="summary-label">失败/异常</span>
                 <span class="summary-value danger">{{ replicas.filter(r => ['failed', 'rejected', 'error'].includes(r.status)).length }}</span>
               </div>
+              <div class="summary-item">
+                <button class="btn btn-view-logs" @click="handleViewServiceLogs">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="16" y1="13" x2="8" y2="13"/>
+                    <line x1="16" y1="17" x2="8" y2="17"/>
+                    <polyline points="10 9 9 9 8 9"/>
+                  </svg>
+                  查看日志
+                </button>
+              </div>
             </div>
 
             <div class="replicas-list">
@@ -205,8 +224,8 @@ onUnmounted(() => {
                       <button 
                         class="btn-icon" 
                         @click="handleViewLogs(replica)"
-                        :disabled="!replica.containerId"
-                        title="查看日志"
+                        :disabled="true"
+                        title="副本日志功能暂未开放"
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -219,8 +238,8 @@ onUnmounted(() => {
                       <button 
                         class="btn-icon" 
                         @click="handleEnterContainer(replica)"
-                        :disabled="!replica.containerId"
-                        title="进入容器"
+                        :disabled="true"
+                        title="进入容器功能暂未开放"
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="4 17 10 11 4 5"/>
@@ -262,6 +281,14 @@ onUnmounted(() => {
         </div>
       </div>
     </Transition>
+    
+    <!-- 日志查看对话框 -->
+    <LogViewerDialog
+      :visible="showLogViewer"
+      :replica="selectedReplica || {}"
+      :service-id="service.id"
+      @update:visible="showLogViewer = $event"
+    />
   </Teleport>
 </template>
 
@@ -381,6 +408,38 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.summary-item:last-child {
+  flex: initial;
+  min-width: auto;
+  justify-content: center;
+}
+
+.btn-view-logs {
+  padding: 0.75rem 1.25rem;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 0.9rem;
+  border: none;
+  background: var(--primary-gradient);
+  color: white;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.2);
+}
+
+.btn-view-logs:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+}
+
+.btn-view-logs:active {
+  transform: translateY(0);
 }
 
 .summary-label {

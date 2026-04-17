@@ -114,3 +114,15 @@ export function getAvailableVersions(id) {
     method: 'get'
   })
 }
+
+/**
+ * 获取服务日志流地址
+ * @param {Number} serviceId 服务ID
+ * @param {Number} tail 获取最后N行
+ * @param {Boolean} follow 是否持续推送
+ * @returns {String} SSE URL
+ */
+export function getServiceLogsUrl(serviceId, tail = 500, follow = false) {
+  const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
+  return `${baseURL}/service/${serviceId}/logs?tail=${tail}&follow=${follow}`
+}

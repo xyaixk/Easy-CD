@@ -11,6 +11,7 @@ import com.easy.cd.entity.Environment;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -99,9 +100,9 @@ public class DeployService {
     /**
      * 获取镜像的所有可用版本（从镜像仓库）
      */
-    public List<ImageVersionDTO> getAvailableVersions(String deployType, String dockerImage) {
+    public List<ImageVersionDTO> getAvailableVersions(String deployType, String dockerImage, String registryUrl) {
         DeployStrategy strategy = strategyFactory.getStrategy(deployType);
-        return strategy.getAvailableVersions(dockerImage);
+        return strategy.getAvailableVersions(dockerImage, registryUrl);
     }
     
     /**
@@ -118,5 +119,14 @@ public class DeployService {
     public List<ServiceMetricsInfo> collectServiceMetrics(String deployType, Environment environment, List<AppService> services) {
         DeployStrategy strategy = strategyFactory.getStrategy(deployType);
         return strategy.collectServiceMetrics(environment, services);
+    }
+    
+    /**
+     * 流式推送服务聚合日志（SSE）
+     */
+    public SseEmitter streamServiceLogs(Environment environment, String serviceName, Integer tail, Boolean follow) {
+        log.info("获取服务日志, 类型: {}, 服务名: {}", environment.getDeployType(), serviceName);
+        DeployStrategy strategy = strategyFactory.getStrategy(environment.getDeployType());
+        return strategy.streamServiceLogs(environment, serviceName, tail, follow);
     }
 }

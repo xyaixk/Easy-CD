@@ -10,6 +10,7 @@ import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -115,7 +116,7 @@ public class K8sDeployStrategy implements DeployStrategy {
     }
     
     @Override
-    public List<ImageVersionDTO> getAvailableVersions(String dockerImage) {
+    public List<ImageVersionDTO> getAvailableVersions(String dockerImage, String registryUrl) {
         // TODO: K8s also uses Docker images, implement registry query
         // For now, return empty list
         return new ArrayList<>();
@@ -131,6 +132,15 @@ public class K8sDeployStrategy implements DeployStrategy {
     public List<ServiceMetricsInfo> collectServiceMetrics(Environment environment, List<AppService> services) {
         // TODO: 实现K8s服务指标收集
         return new ArrayList<>();
+    }
+    
+    @Override
+    public SseEmitter streamServiceLogs(Environment environment, String serviceName, Integer tail, Boolean follow) {
+        log.info("获取K8s服务日志: {}", serviceName);
+        // TODO: 实现K8s服务日志查看
+        SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
+        emitter.completeWithError(new RuntimeException("K8s日志查看功能尚未实现"));
+        return emitter;
     }
 
 }

@@ -10,30 +10,22 @@ import com.easy.cd.dto.ImageVersionDTO;
 import com.easy.cd.dto.ReplicaDetailDTO;
 import com.easy.cd.dto.ServiceCreateDTO;
 import com.easy.cd.dto.ServiceUpdateDTO;
-import com.easy.cd.entity.AppService;
-import com.easy.cd.entity.Environment;
-import com.easy.cd.entity.ReplicaMetrics;
-import com.easy.cd.entity.ReplicaStatus;
-import com.easy.cd.entity.ServiceMetrics;
-import com.easy.cd.entity.ServiceStatus;
+import com.easy.cd.entity.*;
 import com.easy.cd.exception.BusinessException;
-import com.easy.cd.mapper.EnvironmentMapper;
-import com.easy.cd.mapper.ReplicaMetricsMapper;
-import com.easy.cd.mapper.ReplicaStatusMapper;
-import com.easy.cd.mapper.ServiceMapper;
-import com.easy.cd.mapper.ServiceMetricsMapper;
-import com.easy.cd.mapper.ServiceStatusMapper;
+import com.easy.cd.mapper.*;
 import com.easy.cd.service.ServiceManagementService;
 import com.easy.cd.vo.ServiceDetailVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.function.BinaryOperator;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * 服务管理业务实现类
@@ -375,14 +367,16 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             new LambdaQueryWrapper<ReplicaStatus>()
                 .eq(ReplicaStatus::getServiceId, id)
                 .notIn(ReplicaStatus::getStatus, "shutdown", "complete", "remove")
-                .orderByAsc(ReplicaStatus::getTaskSlot)
         );
         
-        // 转换为DTO列表
-        List<ReplicaDetailDTO> result = new ArrayList<>();
-        for (ReplicaStatus replicaStatus : replicaStatusList) {
-            result.add(convertToReplicaDetailDTO(replicaStatus));
-        }
+        // 使用 Stream 按 slot 分组，每组取更新时间最新的一条，然后转换为 DTO
+        List<ReplicaDetailDTO> result = replicaStatusList.stream()
+            .filter(replica -> replica.getTaskSlot() != null)
+            .collect(Collectors.toMap(ReplicaStatus::getTaskSlot, Function.identity(), BinaryOperator.maxBy(Comparator.comparing(ReplicaStatus::getUpdatedTime))))
+            .entrySet().stream()
+            .sorted(Map.Entry.comparingByKey())
+            .map(entry -> convertToReplicaDetailDTO(entry.getValue()))
+            .collect(Collectors.toList());
         
         log.info("查询到 {} 个副本", result.size());
         return result;
@@ -404,11 +398,10 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             .errorMessage(status.getErrorMessage())
             .build();
         
-        // 运行时间
-        if (status.getUptimeSeconds() != null) {
-            dto.setUptime(formatUptime(status.getUptimeSeconds()));
-        } else if (status.getStartTime() != null) {
-            long seconds = java.time.Duration.between(status.getStartTime(), LocalDateTime.now()).getSeconds();
+        // 运行时间 - 使用数据库的 createdTime 而不是 Docker 的 timestamp
+        if (status.getStatus() != null && status.getStatus().equals("running") && status.getCreatedTime() != null) {
+            LocalDateTime now = LocalDateTime.now();
+            long seconds = java.time.Duration.between(status.getCreatedTime(), now).getSeconds();
             dto.setUptime(formatUptime(seconds));
         }
         
@@ -786,10 +779,24 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             throw new BusinessException("Environment not found");
         }
         
+        // Parse environment config to get registryUrl
+        String registryUrl = null;
+        if (environment.getConfig() != null) {
+            try {
+                Map<String, Object> config = JSON.parseObject(environment.getConfig(), 
+                    new TypeReference<Map<String, Object>>() {});
+                registryUrl = (String) config.get("registryUrl");
+                log.info("从环境配置获取 registryUrl: {}", registryUrl);
+            } catch (Exception e) {
+                log.warn("解析环境配置失败: {}", e.getMessage());
+            }
+        }
+        
         // Call deploy service to get available versions
         List<ImageVersionDTO> versions = deployService.getAvailableVersions(
             environment.getDeployType(), 
-            service.getDockerImage()
+            service.getDockerImage(),
+            registryUrl
         );
         
         // Mark current version
@@ -805,5 +812,36 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         
         log.info("Found {} available versions for service {}", versions.size(), service.getName());
         return versions;
+    }
+    
+    /**
+     * 流式推送副本日志（SSE）
+     */
+    @Override
+    public SseEmitter streamLogs(Long serviceId, String replicaId, Integer tail, Boolean follow) {
+        log.info("开始推送日志, serviceId: {}, replicaId: {}, tail: {}, follow: {}", 
+                serviceId, replicaId, tail, follow);
+        
+        // 查询服务信息
+        AppService service = serviceMapper.selectById(serviceId);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        
+        // 获取环境信息
+        Environment environment = environmentMapper.selectById(service.getEnvironmentId());
+        if (environment == null) {
+            throw new BusinessException("环境不存在");
+        }
+        
+        // 调用部署服务获取日志（传递服务名称而不是容器ID）
+        String serviceName = service.getExternalServiceName() != null 
+            ? service.getExternalServiceName()
+            : service.getName().toLowerCase();
+
+        log.info("准备查询日志, 服务信息: name={}, externalServiceName={}, 最终使用serviceName={}",
+                service.getName(), service.getExternalServiceName(), serviceName);
+        
+        return deployService.streamServiceLogs(environment, serviceName, tail, follow);
     }
 }
