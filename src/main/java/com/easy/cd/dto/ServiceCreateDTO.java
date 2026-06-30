@@ -32,6 +32,12 @@ public class ServiceCreateDTO {
      * 副本数量
      */
     private Integer replicas;
+
+    /**
+     * 部署模式：replicated(副本模式) / global(全局模式)
+     * 仅在创建时指定，创建后不可修改
+     */
+    private String serviceMode;
     
     /**
      * Docker运行参数(JSON字符串)

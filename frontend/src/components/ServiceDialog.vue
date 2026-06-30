@@ -22,6 +22,7 @@ const formData = ref({
   serviceName: '',
   description: '',
   dockerImage: '',
+  serviceMode: 'replicated', // replicated / global
   replicas: 1,
   dockerParams: '' // Docker运行参数，格式：KEY1=VALUE1\nKEY2=VALUE2
 })
@@ -52,6 +53,7 @@ const resetForm = () => {
     serviceName: '',
     description: '',
     dockerImage: '',
+    serviceMode: 'replicated',
     replicas: 1,
     dockerParams: ''
   }
@@ -69,14 +71,15 @@ const loadServiceData = () => {
     dockerParamsObj = {}
   }
   
-  // 从 dockerParams 提取 replicas
-  const replicas = dockerParamsObj.replicas || 1
+  // 优先从 app_service.replicas 回显副本数，没有再回退到 dockerParams
+  const replicas = props.service.replicas || props.service.desiredInstances || dockerParamsObj.replicas || 1
   delete dockerParamsObj.replicas
   
   formData.value = {
     serviceName: props.service.name || '',
     description: props.service.description || '',
     dockerImage: props.service.dockerImage || '',
+    serviceMode: props.service.serviceMode || 'replicated',
     replicas: replicas,
     dockerParams: formatEnvVars(dockerParamsObj)
   }
@@ -109,9 +112,12 @@ const validateForm = () => {
     return false
   }
   
-  if (formData.value.replicas < 1 || formData.value.replicas > 100) {
-    alert('副本数必须在1-100之间')
-    return false
+  // global 模式无需校验副本数
+  if (formData.value.serviceMode !== 'global') {
+    if (formData.value.replicas < 1 || formData.value.replicas > 100) {
+      alert('副本数必须在1-100之间')
+      return false
+    }
   }
   
   return true
@@ -128,7 +134,8 @@ const handleConfirm = () => {
     name: formData.value.serviceName,
     description: formData.value.description,
     dockerImage: formData.value.dockerImage,
-    replicas: formData.value.replicas,
+    serviceMode: formData.value.serviceMode,
+    replicas: formData.value.serviceMode === 'global' ? 0 : formData.value.replicas,
     dockerParams: JSON.stringify(parseEnvVars(formData.value.dockerParams))
   }
   
@@ -266,8 +273,36 @@ onUnmounted(() => {
               <div class="form-hint">完整的Docker镜像地址，包含仓库、项目、服务名和标签</div>
             </div>
             
-            <!-- 副本数量 -->
+            <!-- 部署模式 -->
             <div class="form-group">
+              <label>部署模式 <span class="required">*</span></label>
+              <div class="radio-group">
+                <label class="radio-item" :class="{ active: formData.serviceMode === 'replicated' }">
+                  <input
+                    type="radio"
+                    v-model="formData.serviceMode"
+                    value="replicated"
+                    :disabled="!!service"
+                  />
+                  <span>副本模式 (replicated)</span>
+                </label>
+                <label class="radio-item" :class="{ active: formData.serviceMode === 'global' }">
+                  <input
+                    type="radio"
+                    v-model="formData.serviceMode"
+                    value="global"
+                    :disabled="!!service"
+                  />
+                  <span>全局模式 (global)</span>
+                </label>
+              </div>
+              <div class="form-hint">
+                副本模式：手动指定副本数；全局模式：每个 Swarm 节点自动运行 1 个副本（创建后不可修改）
+              </div>
+            </div>
+            
+            <!-- 副本数量 -->
+            <div class="form-group" v-if="formData.serviceMode !== 'global'">
               <label>副本数量 <span class="required">*</span></label>
               <input 
                 v-model.number="formData.replicas" 

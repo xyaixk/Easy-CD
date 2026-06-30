@@ -9,11 +9,15 @@ const props = defineProps({
   },
   selectedEnv: {
     type: Number,
-    required: true
+    default: null
+  },
+  currentUser: {
+    type: Object,
+    default: null
   }
 })
 
-const emit = defineEmits(['update:selectedEnv', 'addEnvironment', 'deleteEnvironment', 'openConfig'])
+const emit = defineEmits(['update:selectedEnv', 'addEnvironment', 'deleteEnvironment', 'openConfig', 'openLogin', 'logout', 'openLogs'])
 
 const currentEnvironment = computed(() => {
   return props.environments.find(e => e.id === props.selectedEnv)
@@ -42,6 +46,7 @@ const currentEnvironment = computed(() => {
           :environments="environments"
           :selected-env="selectedEnv"
           :current-environment="currentEnvironment"
+          :current-user="currentUser"
           @update:selectedEnv="emit('update:selectedEnv', $event)"
           @add-environment="emit('addEnvironment')"
           @delete-environment="emit('deleteEnvironment', $event)"
@@ -54,6 +59,16 @@ const currentEnvironment = computed(() => {
           </svg>
         </button>
         
+        <button class="header-btn" title="日志" @click="emit('openLogs')">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="8" y1="13" x2="16" y2="13"/>
+            <line x1="8" y1="17" x2="16" y2="17"/>
+            <line x1="8" y1="9" x2="10" y2="9"/>
+          </svg>
+        </button>
+
         <button class="header-btn" title="配置管理" @click="emit('openConfig')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
@@ -61,18 +76,31 @@ const currentEnvironment = computed(() => {
           </svg>
         </button>
         
-        <button class="header-btn" title="通知">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
-            <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
-          </svg>
-        </button>
-        
-        <button class="header-btn user-btn" title="用户">
+        <button
+          v-if="!currentUser"
+          class="header-btn user-btn"
+          title="登录"
+          @click="emit('openLogin')"
+        >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
             <circle cx="12" cy="7" r="4"/>
           </svg>
+        </button>
+
+        <button
+          v-else
+          class="header-user"
+          type="button"
+          @click="emit('logout')"
+          :title="`退出 ${currentUser.username}`"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+          <span>{{ currentUser.username }}</span>
+          <span class="logout-text">退出</span>
         </button>
       </div>
     </div>
@@ -171,5 +199,27 @@ const currentEnvironment = computed(() => {
 
 .user-btn {
   background: rgba(255, 255, 255, 0.2);
+}
+
+.header-user {
+  height: 40px;
+  border-radius: 10px;
+  padding: 0 0.875rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.15);
+  color: white;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  backdrop-filter: blur(10px);
+}
+
+.header-user:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.logout-text {
+  font-size: 0.75rem;
+  opacity: 0.8;
 }
 </style>

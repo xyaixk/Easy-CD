@@ -161,10 +161,11 @@ public class ServiceController {
     @GetMapping(value = "/{serviceId}/logs", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamLogs(
             @PathVariable Long serviceId,
+            @RequestParam(required = false) String replicaId,
             @RequestParam(defaultValue = "500") Integer tail,
             @RequestParam(defaultValue = "false") Boolean follow) {
-        log.info("查看服务日志, serviceId: {}, tail: {}, follow: {}", 
-                serviceId, tail, follow);
-        return serviceManagementService.streamLogs(serviceId, null, tail, follow);
+        log.info("查看服务日志, serviceId: {}, replicaId: {}, tail: {}, follow: {}", 
+                serviceId, replicaId, tail, follow);
+        return serviceManagementService.streamLogs(serviceId, replicaId, tail, follow);
     }
 }

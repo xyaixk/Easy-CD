@@ -161,7 +161,8 @@ onUnmounted(() => {
         </button>
         <button 
           class="grid-item"
-          :disabled="service.status === 'stopped'"
+          :disabled="service.status === 'stopped' || service.serviceMode === 'global'"
+          :title="service.serviceMode === 'global' ? 'global 模式不支持手动调整副本数' : ''"
           @click="handleAction('scale')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

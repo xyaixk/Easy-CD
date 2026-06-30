@@ -6,8 +6,11 @@ import EnvDialog from './components/EnvDialog.vue'
 import ServiceDialog from './components/ServiceDialog.vue'
 import ReplicasDialog from './components/ReplicasDialog.vue'
 import ConfigDialog from './components/ConfigDialog.vue'
+import LoginDialog from './components/LoginDialog.vue'
+import LogSearchDialog from './components/LogSearchDialog.vue'
 import toast from '@/utils/toast'
 import { listEnvironments, addEnvironment as addEnvApi, deleteEnvironment as deleteEnvApi, updateEnvironment as updateEnvApi } from '@/api/environment'
+import { login as loginApi, logout as logoutApi, getCurrentUser as getCurrentUserApi } from '@/api/auth'
 import { 
   createService as createServiceApi, 
   updateService as updateServiceApi, 
@@ -18,12 +21,16 @@ import {
   rollbackService,
   scaleService
 } from '@/api/service'
+import { clearAuth, getCurrentUser as getStoredUser, getToken, setAuth } from '@/utils/auth'
 
 // 环境列表
 const environments = ref([])
+const currentUser = ref(getStoredUser())
+const showLoginDialog = ref(false)
+const loginLoading = ref(false)
 
 // 当前选中的环境
-const selectedEnv = ref(1)
+const selectedEnv = ref(null)
 
 // 当前环境信息
 const currentEnvironmentInfo = computed(() => {
@@ -50,6 +57,17 @@ const selectedService = ref(null)
 // 显示配置对话框
 const showConfigDialog = ref(false)
 const configEnvironment = ref(null)
+
+const handleOpenLogin = () => {
+  showLoginDialog.value = true
+}
+
+// 打开日志查询面板
+const showLogSearchDialog = ref(false)
+
+const handleOpenLogs = () => {
+  showLogSearchDialog.value = true
+}
 
 // 打开配置
 const handleOpenConfig = () => {
@@ -80,6 +98,39 @@ const handleConfirmConfig = async (configData) => {
   } catch (error) {
     console.error('保存配置失败:', error)
     toast.error(error.message || '保存失败，请重试')
+  }
+}
+
+const handleLogin = async (formData) => {
+  try {
+    loginLoading.value = true
+    const result = await loginApi(formData)
+    setAuth(result)
+    currentUser.value = result
+    showLoginDialog.value = false
+    await loadEnvironments()
+    await loadServices()
+    toast.success(`登录成功，欢迎 ${result.username}`)
+  } catch (error) {
+    console.error('登录失败:', error)
+    toast.error(error.message || '登录失败，请重试')
+  } finally {
+    loginLoading.value = false
+  }
+}
+
+const handleLogout = async () => {
+  try {
+    await logoutApi()
+  } catch (error) {
+    console.error('退出登录失败:', error)
+  } finally {
+    clearAuth()
+    currentUser.value = null
+    services.value = []
+    await loadEnvironments()
+    await loadServices()
+    toast.success('已退出登录')
   }
 }
 
@@ -189,6 +240,9 @@ const loadEnvironments = async () => {
         selectedEnv.value = data[0].id
         localStorage.setItem('selectedEnvId', data[0].id)
       }
+    } else {
+      selectedEnv.value = null
+      localStorage.removeItem('selectedEnvId')
     }
   } catch (error) {
     console.error('加载环境列表失败:', error)
@@ -322,10 +376,23 @@ watch(selectedEnv, (newEnvId) => {
 })
 
 // 页面加载时获取环境列表和服务列表
-onMounted(() => {
-  loadEnvironments()
-  loadServices()
-  startAutoRefresh() // 启动定时刷新
+onMounted(async () => {
+  const token = getToken()
+  if (token) {
+    try {
+      const user = await getCurrentUserApi()
+      setAuth(user)
+      currentUser.value = user
+    } catch (error) {
+      console.error('恢复登录态失败:', error)
+      clearAuth()
+      currentUser.value = null
+    }
+  }
+
+  await loadEnvironments()
+  await loadServices()
+  startAutoRefresh()
 })
 
 // 页面卸载时清理定时器
@@ -366,7 +433,8 @@ const updateService = async (service) => {
       name: service.name,
       description: service.description,
       dockerImage: service.dockerImage,
-      dockerParams: service.dockerParams
+      dockerParams: service.dockerParams,
+      replicas: service.replicas || 1
     })
     toast.success(`服务「${service.name}」更新部署成功`)
     await loadServices()
@@ -473,10 +541,14 @@ const handleConfirmService = async (serviceData) => {
     <AppHeader 
       :environments="environments"
       :selected-env="selectedEnv"
+      :current-user="currentUser"
       @update:selectedEnv="selectedEnv = $event"
       @add-environment="handleAddEnvironment"
       @delete-environment="handleDeleteEnvironment"
       @open-config="handleOpenConfig"
+      @open-logs="handleOpenLogs"
+      @open-login="handleOpenLogin"
+      @logout="handleLogout"
     />
 
     <!-- 主内容区 -->
@@ -596,6 +668,20 @@ const handleConfirmService = async (serviceData) => {
       :environment="configEnvironment"
       @update:visible="showConfigDialog = $event"
       @confirm="handleConfirmConfig"
+    />
+
+    <LoginDialog
+      :visible="showLoginDialog"
+      :loading="loginLoading"
+      @update:visible="showLoginDialog = $event"
+      @confirm="handleLogin"
+    />
+
+    <!-- 全局日志查询弹窗（全屏） -->
+    <LogSearchDialog
+      :visible="showLogSearchDialog"
+      :current-environment="currentEnvironmentInfo"
+      @update:visible="showLogSearchDialog = $event"
     />
   </div>
 </template>

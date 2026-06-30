@@ -14,6 +14,7 @@ const formData = ref({
   name: '',
   color: '#667eea',
   deployType: 'docker',
+  needLogin: false,
   config: {}
 })
 
@@ -22,6 +23,7 @@ const resetForm = () => {
     name: '',
     color: '#667eea',
     deployType: 'docker',
+    needLogin: false,
     config: {}
   }
 }
@@ -103,6 +105,20 @@ onUnmounted(() => {
             <option value="k8s" disabled>Kubernetes（暂不支持）</option>
           </select>
           <div class="form-hint">具体部署配置请在创建后通过右上角「配置」按钮进行设置</div>
+        </div>
+
+        <div class="form-group">
+          <div class="setting-row">
+            <div class="setting-text">
+              <div class="setting-title">需要登录后可见</div>
+              <div class="setting-desc">开启后，未登录用户不会在环境列表里看到它</div>
+            </div>
+            <label class="switch-control" :class="{ active: formData.needLogin }">
+              <input v-model="formData.needLogin" type="checkbox" class="switch-input" />
+              <span class="switch-thumb"></span>
+            </label>
+          </div>
+          <div class="form-hint">关闭时匿名可见，开启后只有登录后环境列表才会展示</div>
         </div>
       </div>
       
@@ -310,6 +326,74 @@ onUnmounted(() => {
 
 .name-input {
   flex: 1;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+}
+
+.setting-text {
+  min-width: 0;
+}
+
+.setting-title {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.25;
+}
+
+.setting-desc {
+  margin-top: 0.25rem;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.switch-control {
+  position: relative;
+  width: 52px;
+  height: 30px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.switch-control.active {
+  background: var(--primary-gradient);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.18);
+  transition: transform 0.2s ease;
+}
+
+.switch-control.active .switch-thumb {
+  transform: translateX(22px);
+}
+
+.switch-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .form-color-picker {

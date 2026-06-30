@@ -43,6 +43,11 @@ public class DeployRequest {
      * 副本数量
      */
     private Integer replicas;
+
+    /**
+     * 部署模式：replicated / global
+     */
+    private String serviceMode;
     
     /**
      * Java环境变量(JSON字符串)

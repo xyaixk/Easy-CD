@@ -6,7 +6,7 @@ server:
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://dev.bc.office.ysb:3306/cd_database?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://public.bc.office.ysb:3306/cd_database?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
     username: root
     password: AAbb11@@
   jackson:
@@ -18,3 +18,11 @@ mybatis-plus:
   type-aliases-package: com.yunshaoboedu.bmp.entity
   configuration:
     map-underscore-to-camel-case: true
+
+# OpenSearch日志检索配置
+opensearch:
+  uri: http://172.21.49.17:9200
+  # 索引模式：{env} 占位符会被当前环境名替换
+  index-pattern: logs-{env}-*
+  # 单次查询上限（取“全部”时也不超过此值）
+  max-result-window: 10000

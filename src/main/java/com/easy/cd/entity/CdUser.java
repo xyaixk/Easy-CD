@@ -6,22 +6,19 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+
 @Data
-@TableName("environment")
-public class Environment {
-    
+@TableName("cd_user")
+public class CdUser {
+
     @TableId(type = IdType.AUTO)
     private Long id;
-    
-    private String name;
-    
-    private String color;
-    
-    private String deployType;
-    
-    private String config;
-    
-    private Boolean needLogin;
-    
+
+    private String username;
+
+    private String password;
+
     private LocalDateTime createdTime;
+
+    private LocalDateTime updatedTime;
 }

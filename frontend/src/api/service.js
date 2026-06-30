@@ -122,7 +122,8 @@ export function getAvailableVersions(id) {
  * @param {Boolean} follow 是否持续推送
  * @returns {String} SSE URL
  */
-export function getServiceLogsUrl(serviceId, tail = 500, follow = false) {
+export function getServiceLogsUrl(serviceId, tail = 500, follow = false, replicaId = null) {
   const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
-  return `${baseURL}/service/${serviceId}/logs?tail=${tail}&follow=${follow}`
+  const replicaParam = replicaId ? `&replicaId=${encodeURIComponent(replicaId)}` : ''
+  return `${baseURL}/service/${serviceId}/logs?tail=${tail}&follow=${follow}${replicaParam}`
 }

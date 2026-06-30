@@ -62,7 +62,17 @@ public class ServiceDetailVO {
      * 期望实例数
      */
     private Integer desiredInstances;
-    
+
+    /**
+     * 配置的副本数（来自 app_service.replicas）
+     */
+    private Integer replicas;
+
+    /**
+     * 部署模式：replicated / global
+     */
+    private String serviceMode;
+
     /**
      * 部署时间
      */

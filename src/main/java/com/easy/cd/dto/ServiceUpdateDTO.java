@@ -33,4 +33,9 @@ public class ServiceUpdateDTO {
      * Docker运行参数(JSON字符串)
      */
     private String dockerParams;
+
+    /**
+     * 副本数量
+     */
+    private Integer replicas;
 }

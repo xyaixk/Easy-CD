@@ -38,6 +38,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final int MIN_REPLICAS = 1;
     private static final int MAX_REPLICAS = 100;
+    private static final String SERVICE_MODE_GLOBAL = "global";
+    private static final String SERVICE_MODE_REPLICATED = "replicated";
     
     private final ServiceMapper serviceMapper;
     private final ServiceStatusMapper serviceStatusMapper;
@@ -340,13 +342,23 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             throw new BusinessException("服务不存在");
         }
         
+        // global 模式不支持手动扩缩容
+        if (isGlobalMode(service.getServiceMode())) {
+            throw new BusinessException("global 模式不支持手动扩缩容");
+        }
+        
         Environment environment = getEnvironmentOrThrow(service.getEnvironmentId());
         
         DeployResult result = deployService.scale(environment.getDeployType(), id, replicas);
         if (!result.getSuccess()) {
             throw new BusinessException("调整副本数失败: " + result.getMessage());
         }
-        
+
+        // 同步更新 app_service 表中的副本数
+        service.setReplicas(replicas);
+        service.setUpdatedTime(LocalDateTime.now());
+        serviceMapper.updateById(service);
+
         log.info("服务副本数调整成功: {}, 新副本数: {}", service.getName(), replicas);
     }
     
@@ -372,7 +384,12 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         // 使用 Stream 按 slot 分组，每组取更新时间最新的一条，然后转换为 DTO
         List<ReplicaDetailDTO> result = replicaStatusList.stream()
             .filter(replica -> replica.getTaskSlot() != null)
-            .collect(Collectors.toMap(ReplicaStatus::getTaskSlot, Function.identity(), BinaryOperator.maxBy(Comparator.comparing(ReplicaStatus::getUpdatedTime))))
+            .collect(Collectors.toMap(
+                ReplicaStatus::getTaskSlot,
+                Function.identity(),
+                BinaryOperator.maxBy(Comparator.comparing(
+                    ReplicaStatus::getUpdatedTime,
+                    Comparator.nullsLast(Comparator.naturalOrder())))))
             .entrySet().stream()
             .sorted(Map.Entry.comparingByKey())
             .map(entry -> convertToReplicaDetailDTO(entry.getValue()))
@@ -407,7 +424,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         
         return dto;
     }
-    
+
     /**
      * 格式化运行时间
      */
@@ -424,11 +441,35 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
+     * 判断是否为 global 部署模式
+     */
+    private boolean isGlobalMode(String serviceMode) {
+        return SERVICE_MODE_GLOBAL.equalsIgnoreCase(serviceMode);
+    }
+    
+    /**
+     * 归一化部署模式：null/空/非法值统一回退为 replicated
+     */
+    private String normalizeServiceMode(String serviceMode) {
+        if (serviceMode == null || serviceMode.trim().isEmpty()) {
+            return SERVICE_MODE_REPLICATED;
+        }
+        String trimmed = serviceMode.trim().toLowerCase();
+        if (SERVICE_MODE_GLOBAL.equals(trimmed)) {
+            return SERVICE_MODE_GLOBAL;
+        }
+        return SERVICE_MODE_REPLICATED;
+    }
+    
+    /**
      * 验证请求并获取环境信息
      */
     private Environment validateAndGetEnvironment(ServiceCreateDTO createDTO) {
         validateBasicFields(createDTO);
-        validateReplicasField(createDTO.getReplicas());
+        // global 模式无副本数概念，跳过副本数校验
+        if (!isGlobalMode(createDTO.getServiceMode())) {
+            validateReplicasField(createDTO.getReplicas());
+        }
         
         Environment environment = getEnvironmentOrThrow(createDTO.getEnvironmentId());
         
@@ -514,7 +555,11 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
      * 构建部署请求
      */
     private DeployRequest buildDeployRequest(ServiceCreateDTO createDTO, Long serviceId) {
-        Integer replicas = createDTO.getReplicas() != null ? createDTO.getReplicas() : 1;
+        String serviceMode = normalizeServiceMode(createDTO.getServiceMode());
+        // global 模式忽略副本数（由 Swarm 自行决定每节点 1 个）
+        Integer replicas = SERVICE_MODE_GLOBAL.equals(serviceMode)
+                ? null
+                : (createDTO.getReplicas() != null ? createDTO.getReplicas() : 1);
         
         return DeployRequest.builder()
             .serviceId(serviceId)
@@ -524,6 +569,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             .replicas(replicas)
             .dockerParams(createDTO.getDockerParams())
             .environmentId(createDTO.getEnvironmentId())
+            .serviceMode(serviceMode)
             .build();
     }
     
@@ -543,7 +589,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
      */
     private Integer extractReplicas(Map<String, Object> dockerParams) {
         Object replicasObj = dockerParams.get("replicas");
-        return replicasObj != null ? Integer.parseInt(replicasObj.toString()) : 1;
+        return replicasObj != null ? Integer.parseInt(replicasObj.toString()) : null;
     }
     
     /**
@@ -566,7 +612,15 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         service.setEnvironmentId(createDTO.getEnvironmentId());
         service.setDockerImage(createDTO.getDockerImage());
         service.setDockerParams(createDTO.getDockerParams());
-        
+        String serviceMode = normalizeServiceMode(createDTO.getServiceMode());
+        service.setServiceMode(serviceMode);
+        // global 模式副本数置为 0（由 Swarm 自行管理，每节点 1 个）
+        if (SERVICE_MODE_GLOBAL.equals(serviceMode)) {
+            service.setReplicas(0);
+        } else {
+            service.setReplicas(createDTO.getReplicas() != null ? createDTO.getReplicas() : 1);
+        }
+
         // 从镜像中提取版本号并保存到 app_service.version
         Environment environment = environmentMapper.selectById(createDTO.getEnvironmentId());
         if (environment != null) {
@@ -626,10 +680,16 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         // 使用更新的字段，如果为null则使用原有值
         String dockerImage = updateDTO.getDockerImage() != null ? updateDTO.getDockerImage() : service.getDockerImage();
         String dockerParams = updateDTO.getDockerParams() != null ? updateDTO.getDockerParams() : service.getDockerParams();
-        
-        Map<String, Object> params = parseDockerParams(dockerParams);
-        Integer replicas = extractReplicas(params);
-        
+
+        // global 模式不传递副本数；replicated 模式按三级优先级
+        Integer replicas = null;
+        if (!isGlobalMode(service.getServiceMode())) {
+            replicas = updateDTO.getReplicas();
+            if (replicas == null || replicas <= 0) {
+                replicas = service.getReplicas();
+            }
+        }
+
         return DeployRequest.builder()
             .serviceId(service.getId())
             .serviceName(service.getName())
@@ -638,6 +698,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             .replicas(replicas)
             .dockerParams(dockerParams)
             .environmentId(service.getEnvironmentId())
+            .serviceMode(normalizeServiceMode(service.getServiceMode()))
             .build();
     }
     
@@ -650,7 +711,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         }
         if (updateDTO.getDockerImage() != null) {
             service.setDockerImage(updateDTO.getDockerImage());
-            
+
             // 如果更新了镜像，重新提取版本号并保存到 app_service.version
             Environment environment = environmentMapper.selectById(service.getEnvironmentId());
             if (environment != null) {
@@ -661,6 +722,10 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         }
         if (updateDTO.getDockerParams() != null) {
             service.setDockerParams(updateDTO.getDockerParams());
+        }
+        // global 模式忽略副本数变更
+        if (updateDTO.getReplicas() != null && !isGlobalMode(service.getServiceMode())) {
+            service.setReplicas(updateDTO.getReplicas());
         }
         service.setUpdatedTime(LocalDateTime.now());
         serviceMapper.updateById(service);
@@ -726,7 +791,13 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         
         // 版本号：从 app_service.version 读取
         vo.setVersion(service.getVersion() != null ? service.getVersion() : "unknown");
-        
+
+        // 配置的副本数：从 app_service.replicas 读取
+        vo.setReplicas(service.getReplicas());
+
+        // 部署模式
+        vo.setServiceMode(normalizeServiceMode(service.getServiceMode()));
+
         // 状态信息
         if (status != null) {
             vo.setStatus(status.getStatus());
@@ -834,13 +905,12 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             throw new BusinessException("环境不存在");
         }
         
-        // 调用部署服务获取日志（传递服务名称而不是容器ID）
         String serviceName = service.getExternalServiceName() != null 
             ? service.getExternalServiceName()
             : service.getName().toLowerCase();
 
-        log.info("准备查询日志, 服务信息: name={}, externalServiceName={}, 最终使用serviceName={}",
-                service.getName(), service.getExternalServiceName(), serviceName);
+        log.info("准备查询日志, 服务信息: name={}, externalServiceName={}, 最终使用serviceName={}, replicaId={}",
+                service.getName(), service.getExternalServiceName(), serviceName, replicaId);
         
         return deployService.streamServiceLogs(environment, serviceName, tail, follow);
     }

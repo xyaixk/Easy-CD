@@ -73,6 +73,9 @@ const memoryDisplay = computed(() => {
           <span class="status-dot" :class="{ 'spinning': service.status === 'deploying' }"></span>
           {{ getStatusText(service.status) }}
         </span>
+        <span v-if="service.serviceMode === 'global'" class="service-mode-badge" title="全局模式：每个 Swarm 节点自动运行 1 个副本">
+          GLOBAL
+        </span>
       </div>
       <span class="service-version">{{ service.version }}</span>
     </div>
@@ -153,6 +156,20 @@ const memoryDisplay = computed(() => {
   color: var(--status-color);
   font-size: 0.75rem;
   font-weight: 600;
+}
+
+.service-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.5rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  vertical-align: middle;
 }
 
 .replicas-section {

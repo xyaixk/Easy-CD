@@ -27,6 +27,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -75,8 +76,14 @@ public class DockerDeployStrategy implements DeployStrategy {
     // 随机数用于从多个 Manager 地址中选择入口
     private final Random random = new Random();
 
-    // 访问 Registry API 或外部 HTTP 服务的客户端
-    private final RestTemplate restTemplate = new RestTemplate();
+    // 访问 Registry API 或外部 HTTP 服务的客户端（带 1s 连接/10s 读取超时）
+    private RestTemplate restTemplate;
+    {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(1000);   // 连接超时 1 秒：快速探测端口是否可达
+        factory.setReadTimeout(10000);     // 读取超时 10 秒：连上后给足数据返回时间
+        restTemplate = new RestTemplate(factory);
+    }
     
     /**
      * 部署或更新 Docker Swarm 服务。
@@ -141,8 +148,13 @@ public class DockerDeployStrategy implements DeployStrategy {
             // 获取服务状态
             Service service = dockerClient.inspectServiceCmd(serviceName).exec();
             String dockerServiceId = service.getId();
-            Long replicasLong = service.getSpec().getMode().getReplicated().getReplicas();
-            Integer replicas = replicasLong != null ? replicasLong.intValue() : 0;
+            // global 模式没有 replicated 字段，期望副本数取 0 占位（实际由节点数决定，状态刷新任务会修正）
+            Integer replicas = 0;
+            if (service.getSpec().getMode() != null
+                    && service.getSpec().getMode().getReplicated() != null) {
+                Long replicasLong = service.getSpec().getMode().getReplicated().getReplicas();
+                replicas = replicasLong != null ? replicasLong.intValue() : 0;
+            }
             
             // 从实际部署的服务中获取镜像信息
             String actualImage = service.getSpec().getTaskTemplate().getContainerSpec().getImage();
@@ -262,20 +274,11 @@ public class DockerDeployStrategy implements DeployStrategy {
                 // 服务不存在（可能已被停止），重新创建服务
                 log.info("服务不存在，重新创建服务: {}", serviceName);
                 
-                // 解析 dockerParams 获取副本数
-                Integer replicas = 1; // 默认值
-                try {
-                    if (appService.getDockerParams() != null) {
-                        Map<String, Object> dockerParams = parseConfig(appService.getDockerParams());
-                        Object replicasObj = dockerParams.get("replicas");
-                        if (replicasObj != null) {
-                            replicas = Integer.parseInt(replicasObj.toString());
-                            log.info("从 dockerParams 解析副本数: {}", replicas);
-                        }
-                    }
-                } catch (Exception e) {
-                    log.warn("解析副本数失败，使用默认值 1: {}", e.getMessage());
-                }
+                // 直接从 app_service 获取用户配置的副本数
+                Integer replicas = appService.getReplicas() != null && appService.getReplicas() > 0
+                    ? appService.getReplicas()
+                    : 1;
+                log.info("使用 app_service 副本数: {}", replicas);
                 
                 // 构建部署请求
                 DeployRequest deployRequest = new DeployRequest();
@@ -284,6 +287,7 @@ public class DockerDeployStrategy implements DeployStrategy {
                 deployRequest.setDockerImage(appService.getDockerImage());
                 deployRequest.setDockerParams(appService.getDockerParams());
                 deployRequest.setReplicas(replicas); // 设置副本数
+                deployRequest.setServiceMode(appService.getServiceMode()); // 透传部署模式（replicated/global）
                 deployRequest.setEnvironmentId(appService.getEnvironmentId());
                 
                 // 调用部署逻辑重新创建服务
@@ -463,7 +467,13 @@ public class DockerDeployStrategy implements DeployStrategy {
             Service service = dockerClient.inspectServiceCmd(serviceName).exec();
             ServiceSpec spec = service.getSpec();
             Long version = service.getVersion().getIndex();
-            
+
+            // global 模式不支持手动调整副本数，副本数由集群节点数决定
+            if (spec.getMode() == null || spec.getMode().getReplicated() == null) {
+                log.warn("服务 {} 为 global 模式，不支持手动调整副本数", serviceName);
+                return DeployResult.failure("global 模式服务不支持手动调整副本数");
+            }
+
             // 更新副本数
             spec.getMode().getReplicated().withReplicas(replicas);
             
@@ -624,9 +634,12 @@ public class DockerDeployStrategy implements DeployStrategy {
             // 有冒号，检查是否是端口号（如 localhost:5000/nginx）
             int colonIndex = imageName.lastIndexOf(":");
             String afterColon = imageName.substring(colonIndex + 1);
+            String beforeColon = imageName.substring(0, colonIndex);
             
-            // 如果冒号后面是纯数字或包含斜杠，说明是端口号，需要添加 :latest
-            if (afterColon.matches("\\d+") || afterColon.contains("/")) {
+            // 如果冒号后面是纯数字或包含斜杠，且冒号前面没有 "/"，说明是端口号
+            // 如 localhost:5000/nginx、192.168.1.1:5000/nginx
+            // 但如果冒号前面有 "/"（如 docker.io/nginx:8），则是镜像路径+标签，不是端口号
+            if ((afterColon.matches("\\d+") || afterColon.contains("/")) && !beforeColon.contains("/")) {
                 imageName = imageName + ":latest";
                 log.info("镜像名未指定标签（检测到端口号），自动添加: {} -> {}", dockerImage, imageName);
             }
@@ -707,12 +720,25 @@ public class DockerDeployStrategy implements DeployStrategy {
             // 网络不存在，创建overlay网络
             try {
                 log.info("网络不存在，开始创建: {}", networkName);
+
+                // 随机生成 80-90 的网段
+                int segment = 80 + random.nextInt(11);
+                String subnet = "172." + segment + ".0.0/16";
+                log.info("指定网段: {}", subnet);
+
+                Network.Ipam.Config ipamConfig = new Network.Ipam.Config()
+                    .withSubnet(subnet);
+
+                Network.Ipam ipam = new Network.Ipam()
+                    .withConfig(Collections.singletonList(ipamConfig));
+
                 dockerClient.createNetworkCmd()
                     .withName(networkName)
                     .withDriver("overlay")
                     .withAttachable(true)  // 允许容器直接连接
+                    .withIpam(ipam)
                     .exec();
-                log.info("网络创建成功: {}", networkName);
+                log.info("网络创建成功: {}，网段: {}", networkName, subnet);
             } catch (Exception createEx) {
                 log.error("创建网络失败: {}", networkName, createEx);
                 throw new RuntimeException("创建网络失败: " + networkName + ", " + createEx.getMessage(), createEx);
@@ -762,11 +788,18 @@ public class DockerDeployStrategy implements DeployStrategy {
         // 应用 HealthCheck
         applyHealthCheck(containerSpec, dockerParams);
         
-        // 设置副本数
-        Integer replicas = request.getReplicas() != null ? request.getReplicas() : 1;
-        ServiceModeConfig modeConfig = new ServiceModeConfig()
-            .withReplicated(new ServiceReplicatedModeOptions()
-                .withReplicas(replicas));
+        // 设置副本数（防御性处理：为null或<=0时默认1）
+        Integer replicas = (request.getReplicas() != null && request.getReplicas() > 0) ? request.getReplicas() : 1;
+        // 根据部署模式切换 ServiceMode：global 不指定副本数，由集群节点数决定
+        boolean isGlobal = "global".equalsIgnoreCase(request.getServiceMode());
+        ServiceModeConfig modeConfig = new ServiceModeConfig();
+        if (isGlobal) {
+            modeConfig.withGlobal(new ServiceGlobalModeOptions());
+            log.info("部署模式: global（每节点一个副本）");
+        } else {
+            modeConfig.withReplicated(new ServiceReplicatedModeOptions().withReplicas(replicas));
+            log.info("部署模式: replicated, 副本数={}", replicas);
+        }
         
         // 设置网络 - 根据参数决定使用 overlay 还是 host 模式
         Environment environment = environmentMapper.selectById(request.getEnvironmentId());
@@ -1213,8 +1246,10 @@ public class DockerDeployStrategy implements DeployStrategy {
         Integer newForceUpdate = (currentForceUpdate != null ? currentForceUpdate : 0) + 1;
         taskSpec.withForceUpdate(newForceUpdate);
         
-        // 步骤5: 更新副本数（如果指定）
-        if (request.getReplicas() != null) {
+        // 步骤5: 更新副本数（仅 replicated 模式）
+        if (request.getReplicas() != null
+                && spec.getMode() != null
+                && spec.getMode().getReplicated() != null) {
             spec.getMode().getReplicated().withReplicas(request.getReplicas());
         }
         
@@ -1324,54 +1359,21 @@ public class DockerDeployStrategy implements DeployStrategy {
             
             // 优先使用环境配置中的 registryUrl
             if (registryUrl != null && !registryUrl.isEmpty()) {
-                // 确保 registryUrl 有协议前缀
-                if (!registryUrl.startsWith("http://") && !registryUrl.startsWith("https://")) {
-                    registryUrl = "https://" + registryUrl;
-                }
                 imageInfo.setRegistryUrl(registryUrl);
+                // 如果镜像本身没有指定 registry，parseImageName 会按 Docker Hub 规则加 library/ 前缀
+                // 但使用私有 Registry 时不需要这个前缀，去掉它
+                if (imageInfo.getImageName().startsWith("library/")) {
+                    imageInfo.setImageName(imageInfo.getImageName().substring("library/".length()));
+                }
                 log.info("使用环境配置中的 registryUrl: {}", registryUrl);
             }
-            
-            log.info("解析镜像信息: dockerImage={}, registryUrl={}, imageName={}", 
+
+            log.info("解析镜像信息: dockerImage={}, registryUrl={}, imageName={}",
                 dockerImage, imageInfo.getRegistryUrl(), imageInfo.getImageName());
-            
-            // Step 2: 构建 Registry API URL
-            String tagsUrl = String.format("%s/v2/%s/tags/list", 
-                imageInfo.getRegistryUrl(), imageInfo.getImageName());
-            
-            log.info("查询镜像版本列表: {}", tagsUrl);
-            
-            // Step 3: 调用 Registry API 获取标签列表
-            HttpHeaders headers = new HttpHeaders();
-            // 如果需要认证，这里添加 Authorization header
-            // headers.set("Authorization", "Basic " + base64Credentials);
-            
-            HttpEntity<String> entity = new HttpEntity<>(headers);
-            ResponseEntity<Map> response = restTemplate.exchange(
-                tagsUrl, HttpMethod.GET, entity, Map.class);
-            
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                Map<String, Object> body = response.getBody();
-                List<String> tags = (List<String>) body.get("tags");
-                
-                if (tags != null && !tags.isEmpty()) {
-                    // 直接返回所有版本，不限制数量
-                    for (String tag : tags) {
-                        versions.add(ImageVersionDTO.builder()
-                            .version(tag)
-                            .digest(null)
-                            .size(null)
-                            .createdTime(null)
-                            .isCurrent(false)
-                            .build());
-                    }
-                    
-                    log.info("成功获取 {} 个版本", versions.size());
-                } else {
-                    log.warn("镜像仓库返回空标签列表");
-                }
-            }
-            
+
+            // Step 2: 调用 Registry API 获取标签列表（支持 HTTP/HTTPS 自动探测）
+            versions = fetchRegistryTags(imageInfo.getRegistryUrl(), imageInfo.getImageName());
+
         } catch (Exception e) {
             log.error("获取镜像版本列表失败: dockerImage={}, error={}", dockerImage, e.getMessage(), e);
         }
@@ -1387,6 +1389,87 @@ public class DockerDeployStrategy implements DeployStrategy {
      * 3. 版本号标签（数字开头）
      * 限制返回数量避免过多API调用
      */
+    /**
+     * 调用 Registry API 获取镜像标签列表，支持 HTTP/HTTPS 自动探测。
+     * <p>如果 registryUrl 已包含协议前缀（http:// 或 https://），直接使用；
+     * 否则优先探测 HTTPS（现代 Registry 默认协议），HTTPS 不通或返回非合法响应时再降级 HTTP。
+     * 不能反过来"先 HTTP 后 HTTPS"——某些公网 80 端口存在网关默认页或非标准跳转，
+     * 会让 HTTP 请求得到 2xx 但 body 不是合法 Registry 响应，从而错过真正的 HTTPS Registry。</p>
+     */
+    private List<ImageVersionDTO> fetchRegistryTags(String registryUrl, String imageName) {
+        boolean hasProtocol = registryUrl.startsWith("http://") || registryUrl.startsWith("https://");
+
+        // 已有协议前缀，直接使用
+        if (hasProtocol) {
+            String tagsUrl = String.format("%s/v2/%s/tags/list", registryUrl, imageName);
+            log.info("查询镜像版本列表: {}", tagsUrl);
+            try {
+                return doFetchRegistryTags(tagsUrl);
+            } catch (Exception e) {
+                log.error("Registry 请求失败: {}, error: {}", tagsUrl, e.getMessage());
+                return new ArrayList<>();
+            }
+        }
+
+        // 没有协议前缀：优先探测 HTTPS
+        String httpsUrl = String.format("https://%s/v2/%s/tags/list", registryUrl, imageName);
+        log.info("探测 Registry HTTPS: {}", httpsUrl);
+        try {
+            List<ImageVersionDTO> httpsResult = doFetchRegistryTags(httpsUrl);
+            if (httpsResult != null && !httpsResult.isEmpty()) {
+                return httpsResult;
+            }
+            log.warn("Registry HTTPS 返回空标签，降级尝试 HTTP");
+        } catch (Exception e) {
+            log.warn("Registry HTTPS 探测失败: {}, error: {}", httpsUrl, e.getMessage());
+        }
+
+        // HTTPS 不通或返回空，降级探测 HTTP
+        String httpUrl = String.format("http://%s/v2/%s/tags/list", registryUrl, imageName);
+        log.info("探测 Registry HTTP: {}", httpUrl);
+        try {
+            return doFetchRegistryTags(httpUrl);
+        } catch (Exception e) {
+            log.error("Registry HTTP 探测也失败: {}, error: {}", httpUrl, e.getMessage());
+        }
+
+        return new ArrayList<>();
+    }
+
+    /**
+     * 执行 Registry API 请求获取标签列表
+     */
+    private List<ImageVersionDTO> doFetchRegistryTags(String tagsUrl) {
+        List<ImageVersionDTO> versions = new ArrayList<>();
+
+        HttpHeaders headers = new HttpHeaders();
+        HttpEntity<String> entity = new HttpEntity<>(headers);
+        ResponseEntity<Map> response = restTemplate.exchange(
+            tagsUrl, HttpMethod.GET, entity, Map.class);
+
+        if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+            Map<String, Object> body = response.getBody();
+            List<String> tags = (List<String>) body.get("tags");
+
+            if (tags != null && !tags.isEmpty()) {
+                for (String tag : tags) {
+                    versions.add(ImageVersionDTO.builder()
+                        .version(tag)
+                        .digest(null)
+                        .size(null)
+                        .createdTime(null)
+                        .isCurrent(false)
+                        .build());
+                }
+                log.info("成功获取 {} 个版本", versions.size());
+            } else {
+                log.warn("镜像仓库返回空标签列表");
+            }
+        }
+
+        return versions;
+    }
+
     private List<String> selectImportantTags(List<String> allTags) {
         List<String> selected = new ArrayList<>();
         Set<String> priorityTags = new HashSet<>();
@@ -1459,11 +1542,11 @@ public class DockerDeployStrategy implements DeployStrategy {
                 String registry = beforeSlash;
                 String imageName = imageWithoutTag.substring(firstSlash + 1);
                 
-                // 判断协议
+                // 判断协议：localhost 和带端口的默认 http，其余保持原样不强制 https
                 if (registry.contains("localhost") || registry.matches(".*:\\d+")) {
                     info.setRegistryUrl("http://" + registry);
                 } else {
-                    info.setRegistryUrl("https://" + registry);
+                    info.setRegistryUrl(registry);
                 }
                 info.setImageName(imageName);
             } else {
@@ -1538,21 +1621,26 @@ public class DockerDeployStrategy implements DeployStrategy {
             int failCount = 0;
             for (AppService appService : services) {
                 try {
-                    String serviceName = buildServiceName(appService.getName(), environment.getName());
+                    String serviceName = appService.getExternalServiceName() != null
+                        ? appService.getExternalServiceName()
+                        : buildServiceName(appService.getName(), environment.getName());
                     ServiceStatusInfo statusInfo = collectSingleServiceStatus(dockerClient, appService.getId(), serviceName);
                     statusList.add(statusInfo);
                     successCount++;
                 } catch (Exception e) {
                     failCount++;
                     log.debug("收集服务[{}]状态失败", appService.getName(), e);
-                    // 服务不存在或异常，返回stopped状态
+                    // 服务不存在或异常，返回stopped状态，但保留用户配置的副本数
+                    Integer desiredReplicas = appService.getReplicas() != null && appService.getReplicas() > 0
+                        ? appService.getReplicas()
+                        : 1;
                     statusList.add(ServiceStatusInfo.builder()
                         .serviceId(appService.getId())
                         .serviceName(appService.getName())
                         .status("stopped")
                         .healthyInstances(0)
                         .instances(0)
-                        .desiredInstances(0)
+                        .desiredInstances(desiredReplicas)
                         .build());
                 }
             }
@@ -1636,6 +1724,10 @@ public class DockerDeployStrategy implements DeployStrategy {
         
         if (failedTasks > 0 && healthyInstances == 0) {
             return "failed";
+        }
+        
+        if (desiredInstances == 0 && runningInstances == 0 && healthyInstances == 0) {
+            return "stopped";
         }
         
         // 如果健康实例数等于期望值，运行正常
@@ -1877,8 +1969,9 @@ public class DockerDeployStrategy implements DeployStrategy {
                 // 连接到Swarm Manager - Service日志可以在Manager节点查询
                 dockerClient = createDockerClientWithFailover(managerHosts);
                 
-                // 查询服务信息,获取服务ID
-                com.github.dockerjava.api.model.Service dockerService = null;
+                int effectiveTail = (tail != null && tail > 0) ? Math.min(tail, 1000) : 100;
+
+                com.github.dockerjava.api.model.Service dockerService;
                 try {
                     dockerService = dockerClient.inspectServiceCmd(serviceName).exec();
                 } catch (Exception e) {
@@ -1886,23 +1979,11 @@ public class DockerDeployStrategy implements DeployStrategy {
                     emitter.completeWithError(new RuntimeException("服务不存在: " + serviceName));
                     return;
                 }
-                
-                // 使用服务ID而不是服务名查询日志
+
                 String serviceId = dockerService.getId();
-                
-                // 构建Service日志命令 - 使用服务ID
-                com.github.dockerjava.api.command.LogSwarmObjectCmd logCmd = dockerClient.logServiceCmd(serviceId)
-                    .withStdout(true)
-                    .withStderr(true)
-                    .withTimestamps(true)
-                    .withFollow(follow);
-                
-                // 设置获取最后N行 - 限制最大1000行，防止日志过多导致内存溢出
-                int effectiveTail = (tail != null && tail > 0) ? Math.min(tail, 1000) : 100;
-                logCmd.withTail(effectiveTail);
-                
-                // 执行日志命令，异步推送
-                logCmd.exec(new ResultCallback.Adapter<Frame>() {
+                Integer since = resolveCurrentTaskSince(dockerClient, serviceName);
+
+                ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<Frame>() {
                     @Override
                     public void onNext(Frame frame) {
                         try {
@@ -1933,7 +2014,19 @@ public class DockerDeployStrategy implements DeployStrategy {
                         log.error("服务日志流错误", throwable);
                         emitter.completeWithError(throwable);
                     }
-                });
+                };
+
+                com.github.dockerjava.api.command.LogSwarmObjectCmd logCmd = dockerClient.logServiceCmd(serviceId)
+                    .withStdout(true)
+                    .withStderr(true)
+                    .withFollow(follow)
+                    .withTail(effectiveTail);
+
+                if (since != null && since > 0) {
+                    logCmd.withSince(since);
+                }
+
+                logCmd.exec(callback);
                 
             } catch (Exception e) {
                 log.error("获取服务日志失败", e);
@@ -1952,5 +2045,64 @@ public class DockerDeployStrategy implements DeployStrategy {
         });
         
         return emitter;
+    }
+
+    private Integer resolveCurrentTaskSince(DockerClient dockerClient, String serviceName) {
+        try {
+            List<Task> tasks = dockerClient.listTasksCmd()
+                .withServiceFilter(serviceName)
+                .exec();
+
+            if (tasks == null || tasks.isEmpty()) {
+                return null;
+            }
+
+            return selectLatestTasksBySlot(tasks).stream()
+                .map(this::parseTaskTimestampToInstant)
+                .filter(instant -> instant != null && !instant.equals(java.time.Instant.EPOCH))
+                .min(java.time.Instant::compareTo)
+                .map(instant -> (int) instant.getEpochSecond())
+                .orElse(null);
+        } catch (Exception e) {
+            log.warn("计算服务[{}]日志 since 时间失败，将回退到完整服务日志", serviceName, e);
+            return null;
+        }
+    }
+
+    private List<Task> selectLatestTasksBySlot(List<Task> tasks) {
+        Map<String, Task> latestTaskByKey = new LinkedHashMap<>();
+        for (Task task : tasks) {
+            String key = task.getSlot() != null ? "slot:" + task.getSlot() : "task:" + task.getId();
+            Task existing = latestTaskByKey.get(key);
+            if (existing == null || parseTaskTimestampToInstant(task).isAfter(parseTaskTimestampToInstant(existing))) {
+                latestTaskByKey.put(key, task);
+            }
+        }
+        return new ArrayList<>(latestTaskByKey.values());
+    }
+
+    private java.time.Instant parseTaskTimestampToInstant(Task task) {
+        try {
+            if (task == null || task.getStatus() == null || task.getStatus().getTimestamp() == null) {
+                return java.time.Instant.EPOCH;
+            }
+
+            String timestamp = task.getStatus().getTimestamp();
+            if (timestamp.contains(".")) {
+                int dotIndex = timestamp.indexOf('.');
+                int zIndex = timestamp.indexOf('Z');
+                if (zIndex > dotIndex) {
+                    String nanos = timestamp.substring(dotIndex + 1, zIndex);
+                    if (nanos.length() > 6) {
+                        nanos = nanos.substring(0, 6);
+                    }
+                    timestamp = timestamp.substring(0, dotIndex + 1) + nanos + "Z";
+                }
+            }
+
+            return java.time.Instant.parse(timestamp);
+        } catch (Exception e) {
+            return java.time.Instant.EPOCH;
+        }
     }
 }

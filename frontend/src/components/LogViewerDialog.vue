@@ -47,7 +47,7 @@ const loadLogs = () => {
   
   try {
     // 直接使用 serviceId 获取服务聚合日志
-    const url = getServiceLogsUrl(props.serviceId, 500, isFollowing.value)
+    const url = getServiceLogsUrl(props.serviceId, 500, isFollowing.value, props.replica?.id || null)
     
     eventSource = new EventSource(url)
     

@@ -318,6 +318,12 @@ onUnmounted(() => {
   color: var(--danger-color);
 }
 
+.optional {
+  color: var(--text-tertiary);
+  font-weight: 400;
+  font-size: 0.85rem;
+}
+
 .form-input,
 .form-select,
 .form-textarea {

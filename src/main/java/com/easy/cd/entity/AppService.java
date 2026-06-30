@@ -33,7 +33,19 @@ public class AppService {
      * 示例: {"replicas":3,"cpuLimit":"1","memoryLimit":"2G","restart":"always"}
      */
     private String dockerParams;
-    
+
+    /**
+     * 副本数量
+     */
+    private Integer replicas;
+
+    /**
+     * 部署模式：replicated(副本模式) / global(全局模式)
+     * - replicated: 按副本数运行，可手动扩缩容
+     * - global: 集群每个节点运行一个，副本数由节点数决定，不支持扩缩容
+     */
+    private String serviceMode;
+
     /**
      * 外部服务ID（部署平台返回的服务标识）
      * Docker Swarm: Service ID
