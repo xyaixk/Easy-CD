@@ -1,7 +1,10 @@
 package com.easy.cd.service.impl;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.easy.cd.config.OpenSearchConfig;
+import com.easy.cd.config.LokiConfig;
 import com.easy.cd.dto.LogQueryDTO;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
@@ -14,76 +17,77 @@ import com.easy.cd.vo.LogPageVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.opensearch.action.search.SearchRequest;
-import org.opensearch.action.search.SearchResponse;
-import org.opensearch.action.support.IndicesOptions;
-import org.opensearch.client.RequestOptions;
-import org.opensearch.client.RestHighLevelClient;
-import org.opensearch.index.query.BoolQueryBuilder;
-import org.opensearch.index.query.QueryBuilders;
-import org.opensearch.index.query.RangeQueryBuilder;
-import org.opensearch.search.SearchHit;
-import org.opensearch.search.builder.SearchSourceBuilder;
-import org.opensearch.search.sort.SortOrder;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import javax.servlet.http.HttpServletResponse;
 import java.io.PrintWriter;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * 日志检索服务：通过 OpenSearch 高级 REST 客户端访问索引。
- *
- * <p>设计要点：</p>
- * <ul>
- *   <li>服务名候选直接读取 app_service 表（按环境隔离），不走 OpenSearch 聚合。</li>
- *   <li>查询 DSL 全部使用 {@link QueryBuilders} 构造，与 ES High-Level API 写法一致。</li>
- *   <li>所有外部异常统一封装为 {@link BusinessException} 并写入日志。</li>
- * </ul>
+ * 日志检索服务：通过 Loki query_range API 查询 Alloy 写入的容器日志。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ObservabilityServiceImpl implements ObservabilityService {
 
-    /** 多个调用点复用的时间格式化器（线程安全不可变） */
+    private static final int LOKI_MAX_QUERY_LIMIT = 5000;
+
     private static final DateTimeFormatter FMT_MINUTE = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
     private static final DateTimeFormatter FMT_SECOND = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    private static final Pattern SPRING_LOG_PATTERN = Pattern.compile(
+            "^(?<time>\\S+)\\s+(?<level>TRACE|DEBUG|INFO|WARN|ERROR)\\s+\\d+\\s+---\\s+\\[[^]]*]\\s+\\[(?<thread>[^]]*)]\\s+(?:\\[(?<trace>[^]-]+)(?:-[^]]*)?]\\s+)?(?<logger>\\S+)\\s*:\\s*(?<msg>.*)$");
 
-    private final OpenSearchConfig osConfig;
-
+    private final LokiConfig lokiConfig;
     private final ServiceMapper serviceMapper;
-
     private final EnvironmentMapper environmentMapper;
 
-    private final RestHighLevelClient openSearchClient;
+    private final RestTemplate restTemplate = new RestTemplate();
 
     @Override
     public LogPageVO searchLogs(LogQueryDTO query) {
         String envName = resolveEnvName(query);
         int size = effectiveSize(query.getSize());
-        int page = query.getPage() == null ? 1 : query.getPage();
-        int from = Math.max(0, page - 1) * size;
-        if (from + size > osConfig.getMaxResultWindow()) {
-            size = Math.max(0, osConfig.getMaxResultWindow() - from);
-            if (size <= 0) {
-                return new LogPageVO(0L, Collections.emptyList());
-            }
+        int page = query.getPage() == null ? 1 : Math.max(1, query.getPage());
+        int from = query.getSize() != null && query.getSize() == -1 ? 0 : Math.max(0, page - 1) * size;
+        int fetchLimit = Math.min(lokiConfig.getMaxResultWindow(), from + size);
+        if (fetchLimit <= 0) {
+            return new LogPageVO(0L, Collections.emptyList());
         }
-        SearchSourceBuilder source = buildSearchSource(query, from, size);
-        SearchResponse resp = executeSearch(envName, source);
-        return parseSearchResponse(resp);
+
+        LokiQueryWindow window = resolveQueryWindow(query);
+        String logql = buildLogQl(envName, query);
+        List<LogItemVO> fetched = executeLokiQuery(logql, window, fetchLimit);
+        List<LogItemVO> pageItems = slicePage(fetched, from, size);
+
+        long total = fetched.size();
+        if (fetched.size() >= fetchLimit && fetchLimit < lokiConfig.getMaxResultWindow()) {
+            total = fetchLimit + 1L;
+        }
+        return new LogPageVO(total, pageItems);
     }
 
     @Override
@@ -108,10 +112,10 @@ public class ObservabilityServiceImpl implements ObservabilityService {
     @Override
     public void exportLogsCsv(LogQueryDTO query, HttpServletResponse response) {
         String envName = resolveEnvName(query);
-        int size = osConfig.getMaxResultWindow();
-        SearchSourceBuilder source = buildSearchSource(query, 0, size);
-        SearchResponse resp = executeSearch(envName, source);
-        LogPageVO page = parseSearchResponse(resp);
+        LokiQueryWindow window = resolveQueryWindow(query);
+        String logql = buildLogQl(envName, query);
+        List<LogItemVO> items = executeLokiQuery(logql, window, lokiConfig.getMaxResultWindow());
+        Collections.reverse(items);
 
         String filename = "logs-" + envName + "-" + System.currentTimeMillis() + ".log";
         try {
@@ -121,43 +125,30 @@ public class ObservabilityServiceImpl implements ObservabilityService {
                     "attachment; filename=\"" + filename + "\"; filename*=UTF-8''" + encoded);
 
             PrintWriter writer = response.getWriter();
-            // 按时间正序输出（检索默认倒序，导出时反转）
-            List<LogItemVO> items = new ArrayList<>(page.getItems());
-            Collections.reverse(items);
             for (LogItemVO it : items) {
                 writer.println(formatLogLine(it));
             }
             writer.flush();
-            log.info("日志导出完成: env={}, rows={}", envName, items.size());
+            log.info("Loki日志导出完成: env={}, rows={}", envName, items.size());
         } catch (Exception e) {
             log.error("日志导出失败: env={}", envName, e);
             throw new BusinessException("日志导出失败: " + e.getMessage());
         }
     }
 
-    /**
-     * 拼接单条原始日志行：
-     * <pre>{timestamp} [{level}] [{service}] [{thread}] [{traceId}] {logger} - {message}{ | bizMessage}</pre>
-     * 空字段会被跳过，避免出现 "[]、 - " 这种空干货。
-     */
     private String formatLogLine(LogItemVO it) {
         StringBuilder sb = new StringBuilder(256);
         if (StringUtils.isNotBlank(it.getTimestamp())) sb.append(it.getTimestamp());
-        if (StringUtils.isNotBlank(it.getLevel()))     sb.append(" [").append(it.getLevel()).append(']');
-        if (StringUtils.isNotBlank(it.getService()))   sb.append(" [").append(it.getService()).append(']');
-        if (StringUtils.isNotBlank(it.getThread()))    sb.append(" [").append(it.getThread()).append(']');
-        if (StringUtils.isNotBlank(it.getTraceId()))   sb.append(" [").append(it.getTraceId()).append(']');
-        if (StringUtils.isNotBlank(it.getLogger()))    sb.append(' ').append(it.getLogger());
-        if (StringUtils.isNotBlank(it.getMessage()))   sb.append(" - ").append(it.getMessage());
+        if (StringUtils.isNotBlank(it.getLevel())) sb.append(" [").append(it.getLevel()).append(']');
+        if (StringUtils.isNotBlank(it.getService())) sb.append(" [").append(it.getService()).append(']');
+        if (StringUtils.isNotBlank(it.getThread())) sb.append(" [").append(it.getThread()).append(']');
+        if (StringUtils.isNotBlank(it.getTraceId())) sb.append(" [").append(it.getTraceId()).append(']');
+        if (StringUtils.isNotBlank(it.getLogger())) sb.append(' ').append(it.getLogger());
+        if (StringUtils.isNotBlank(it.getMessage())) sb.append(" - ").append(it.getMessage());
         if (StringUtils.isNotBlank(it.getBizMessage())) sb.append(" | ").append(it.getBizMessage());
         return sb.toString();
     }
 
-    // ============================ 内部方法 ============================
-
-    /**
-     * 解析查询请求中的环境名：优先取 envName，其次按 envId 反查 environment 表。
-     */
     private String resolveEnvName(LogQueryDTO query) {
         if (query == null) {
             throw new BusinessException("查询参数不能为空");
@@ -180,109 +171,61 @@ public class ObservabilityServiceImpl implements ObservabilityService {
             return 100;
         }
         if (raw == -1) {
-            return osConfig.getMaxResultWindow();
+            return maxQueryLimit();
         }
-        return Math.min(Math.max(1, raw), osConfig.getMaxResultWindow());
+        return Math.min(Math.max(1, raw), maxQueryLimit());
     }
 
-    /**
-     * 构造 SearchSourceBuilder：bool query + 时间过滤 + 排序 + 分页。
-     */
-    private SearchSourceBuilder buildSearchSource(LogQueryDTO q, int from, int size) {
-        BoolQueryBuilder bool = QueryBuilders.boolQuery();
-
-        // 关键字：multi_match on message + biz_message
-        if (StringUtils.isNotBlank(q.getKeyword())) {
-            bool.must(QueryBuilders.multiMatchQuery(q.getKeyword().trim(), "message", "biz_message"));
-        }
-        // traceId：term 精确
-        if (StringUtils.isNotBlank(q.getTraceId())) {
-            bool.filter(QueryBuilders.termQuery("traceId.keyword", q.getTraceId().trim()));
-        }
-        // logger：prefix
-        if (StringUtils.isNotBlank(q.getLogger())) {
-            bool.filter(QueryBuilders.prefixQuery("logger.keyword", q.getLogger().trim()));
-        }
-        // container_name：wildcard *xxx*
-        if (StringUtils.isNotBlank(q.getContainerName())) {
-            bool.filter(QueryBuilders.wildcardQuery("container_name.keyword",
-                    "*" + q.getContainerName().trim() + "*"));
-        }
-        // thread：prefix
-        if (StringUtils.isNotBlank(q.getThread())) {
-            bool.filter(QueryBuilders.prefixQuery("thread.keyword", q.getThread().trim()));
-        }
-        // services：用 app_from_image.keyword 精确匹配。
-        // app_from_image 由采集器从镜像名 nexus.dev.ysb/{name}:{tag} 中截取，
-        // 与 docker-compose 服务名、也就是 app_service.name 完全一致；
-        // 而应用自报的 service / spring_app / app 字段各有命名风格（多个 -service 后缀），不可靠。
-        if (!CollectionUtils.isEmpty(q.getServices())) {
-            bool.filter(QueryBuilders.termsQuery("app_from_image.keyword", q.getServices()));
-        }
-        // levels：terms
-        if (!CollectionUtils.isEmpty(q.getLevels())) {
-            bool.filter(QueryBuilders.termsQuery("level_text.keyword", q.getLevels()));
-        }
-        // 时间范围
-        RangeQueryBuilder range = buildRangeFilter(q);
-        if (range != null) {
-            bool.filter(range);
-        }
-
-        SearchSourceBuilder source = new SearchSourceBuilder()
-                .from(from)
-                .size(size)
-                .trackTotalHits(true)
-                .sort("@timestamp", SortOrder.DESC);
-        source.query(bool.hasClauses() ? bool : QueryBuilders.matchAllQuery());
-        return source;
+    private int maxQueryLimit() {
+        return Math.min(Math.max(1, lokiConfig.getMaxResultWindow()), LOKI_MAX_QUERY_LIMIT);
     }
 
-    /**
-     * 构造时间范围过滤。优先使用自定义 from/to；否则按预设。
-     */
-    private RangeQueryBuilder buildRangeFilter(LogQueryDTO q) {
-        String tr = q.getTimeRange();
-        String fromStr;
-        String toStr;
+    private List<LogItemVO> slicePage(List<LogItemVO> items, int from, int size) {
+        if (from >= items.size()) {
+            return Collections.emptyList();
+        }
+        int to = Math.min(items.size(), from + size);
+        return new ArrayList<>(items.subList(from, to));
+    }
+
+    private LokiQueryWindow resolveQueryWindow(LogQueryDTO query) {
+        String tr = query.getTimeRange();
+        ZonedDateTime to = parseDateTime(query.getTo());
+        if (to == null) {
+            to = ZonedDateTime.now();
+        }
+        ZonedDateTime from = to.minusHours(1);
+
         if ("custom".equalsIgnoreCase(tr)) {
-            fromStr = normalizeDateTime(q.getFrom());
-            toStr = normalizeDateTime(q.getTo());
-            if (fromStr == null && toStr == null) {
-                return null;
+            ZonedDateTime customFrom = parseDateTime(query.getFrom());
+            ZonedDateTime customTo = parseDateTime(query.getTo());
+            if (customFrom != null) {
+                from = customFrom;
+            }
+            if (customTo != null) {
+                to = customTo;
             }
         } else {
             long minutes = parsePresetMinutes(tr);
-            if (minutes <= 0) {
-                return null;
-            }
-            fromStr = "now-" + minutes + "m";
-            toStr = "now";
+            from = to.minusMinutes(minutes > 0 ? minutes : 60);
         }
-        RangeQueryBuilder range = QueryBuilders.rangeQuery("@timestamp");
-        if (fromStr != null) range.gte(fromStr);
-        if (toStr != null)   range.lte(toStr);
-        return range;
+        return new LokiQueryWindow(toNanos(from), toNanos(to));
     }
 
     private long parsePresetMinutes(String tr) {
         if (StringUtils.isBlank(tr)) {
-            return 60; // 默认 1h
+            return 60;
         }
         switch (tr) {
             case "15m": return 15;
-            case "1h":  return 60;
-            case "6h":  return 360;
+            case "1h": return 60;
+            case "6h": return 360;
             case "24h": return 1440;
-            default:    return 0;
+            default: return 60;
         }
     }
 
-    /**
-     * 把 "yyyy-MM-ddTHH:mm" / "yyyy-MM-dd HH:mm" / "yyyy-MM-dd HH:mm:ss" 统一转为
-     * 带本地时区偏移的 ISO-8601 字符串。
-     */
-    private String normalizeDateTime(String s) {
+    private ZonedDateTime parseDateTime(String s) {
         if (StringUtils.isBlank(s)) {
             return null;
         }
@@ -290,62 +233,221 @@ public class ObservabilityServiceImpl implements ObservabilityService {
         try {
             DateTimeFormatter fmt = v.length() <= 16 ? FMT_MINUTE : FMT_SECOND;
             LocalDateTime ldt = LocalDateTime.parse(v, fmt);
-            return ldt.atZone(ZoneId.systemDefault()).toOffsetDateTime().toString();
+            return ldt.atZone(ZoneId.systemDefault());
         } catch (Exception e) {
             log.warn("时间格式解析失败: {} -> {}", s, e.getMessage());
             return null;
         }
     }
 
-    /** 调用 OpenSearch search 接口。 */
-    private SearchResponse executeSearch(String envName, SearchSourceBuilder source) {
-        // OpenSearch 索引名为全小写，environment 表里存的可能是 "Test"/"Prod"，拼接前统一小写避免漏查
-        String index = osConfig.getIndexPattern().replace("{env}", envName.toLowerCase(Locale.ROOT));
-        SearchRequest request = new SearchRequest(index)
-                .source(source)
-                .indicesOptions(IndicesOptions.lenientExpandOpen()); // 索引不存在时返回空，不抛异常
+    private long toNanos(ZonedDateTime time) {
+        Instant instant = time.toInstant();
+        return instant.getEpochSecond() * 1_000_000_000L + instant.getNano();
+    }
+
+    private String buildLogQl(String envName, LogQueryDTO q) {
+        StringBuilder selector = new StringBuilder();
+        selector.append("{app_env=").append(quoteLabel(envName));
+        if (StringUtils.isNotBlank(lokiConfig.getNamespace())) {
+            selector.append(", namespace=").append(quoteLabel(lokiConfig.getNamespace().trim()));
+        }
+        if (!CollectionUtils.isEmpty(q.getServices())) {
+            selector.append(", service_name=~").append(quoteLabel(joinRegex(q.getServices(), false)));
+        }
+        if (StringUtils.isNotBlank(q.getContainerName())) {
+            selector.append(", container_name=~").append(quoteLabel(".*" + regexpQuote(q.getContainerName().trim()) + ".*"));
+        }
+        selector.append('}');
+
+        appendLevelFilter(selector, q.getLevels());
+        appendLineFilter(selector, q.getKeyword());
+        appendLineFilter(selector, q.getTraceId());
+        appendLineFilter(selector, q.getLogger());
+        appendLineFilter(selector, q.getThread());
+        return selector.toString();
+    }
+
+    private void appendLevelFilter(StringBuilder sb, List<String> levels) {
+        if (CollectionUtils.isEmpty(levels)) {
+            return;
+        }
+        String regex = joinRegex(levels, true);
+        if (StringUtils.isNotBlank(regex) && !".*".equals(regex)) {
+            sb.append(" |~ ").append(quoteString("(?i)\\b(" + regex + ")\\b"));
+        }
+    }
+
+    private void appendLineFilter(StringBuilder sb, String value) {
+        if (StringUtils.isNotBlank(value)) {
+            sb.append(" |= ").append(quoteString(value.trim()));
+        }
+    }
+
+    private String joinRegex(List<String> values, boolean lower) {
+        Set<String> unique = new HashSet<>();
+        for (String value : values) {
+            if (StringUtils.isBlank(value)) {
+                continue;
+            }
+            unique.add(regexpQuote(lower ? value.trim().toLowerCase(Locale.ROOT) : value.trim()));
+        }
+        if (unique.isEmpty()) {
+            return ".*";
+        }
+        return String.join("|", unique);
+    }
+
+    private String quoteLabel(String value) {
+        return quoteString(value == null ? "" : value);
+    }
+
+    private String quoteString(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    private String regexpQuote(String value) {
+        StringBuilder sb = new StringBuilder(value.length() * 2);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if ("\\.+*?()|[]{}^$".indexOf(c) >= 0) {
+                sb.append('\\');
+            }
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
+    private List<LogItemVO> executeLokiQuery(String logql, LokiQueryWindow window, int limit) {
+        URI uri = UriComponentsBuilder.fromHttpUrl(trimTrailingSlash(lokiConfig.getUri()) + "/loki/api/v1/query_range")
+                .queryParam("query", logql)
+                .queryParam("start", window.startNanos)
+                .queryParam("end", window.endNanos)
+                .queryParam("limit", limit)
+                .queryParam("direction", "backward")
+                .build()
+                .encode(StandardCharsets.UTF_8)
+                .toUri();
         try {
-            SearchResponse resp = openSearchClient.search(request, RequestOptions.DEFAULT);
-            // 排查用：打印实际索引、命中数、DSL；定位“筛选无结果”时直接看这一行就够
-            long hits = resp != null && resp.getHits() != null && resp.getHits().getTotalHits() != null
-                    ? resp.getHits().getTotalHits().value : -1L;
-            log.info("OpenSearch search: index={} hits={} dsl={}", index, hits, source.toString().replaceAll("\\s+", " "));
-            return resp;
+            ResponseEntity<String> response = restTemplate.getForEntity(uri, String.class);
+            List<LogItemVO> items = parseLokiResponse(response.getBody());
+            items.sort(Comparator.comparing(ObservabilityServiceImpl::timestampNanos).reversed());
+            log.info("Loki search: hits={} query={}", items.size(), logql);
+            return items;
         } catch (Exception e) {
-            log.error("OpenSearch 检索失败: index={}", index, e);
+            log.error("Loki 检索失败: query={}", logql, e);
             throw new BusinessException("日志检索失败: " + e.getMessage());
         }
     }
 
-    /** 解析 SearchResponse 为 LogPageVO。 */
-    private LogPageVO parseSearchResponse(SearchResponse resp) {
-        if (resp == null || resp.getHits() == null) {
-            return new LogPageVO(0L, Collections.emptyList());
+    private String trimTrailingSlash(String uri) {
+        if (StringUtils.isBlank(uri)) {
+            return "http://localhost:3100";
         }
-        long total = resp.getHits().getTotalHits() != null ? resp.getHits().getTotalHits().value : 0L;
-        SearchHit[] hits = resp.getHits().getHits();
-        List<LogItemVO> items = new ArrayList<>(hits.length);
-        for (SearchHit hit : hits) {
-            Map<String, Object> src = hit.getSourceAsMap();
-            if (src == null) continue;
-            items.add(toItem(src));
+        String value = uri.trim();
+        while (value.endsWith("/")) {
+            value = value.substring(0, value.length() - 1);
         }
-        return new LogPageVO(total, items);
+        return value;
     }
 
-    private LogItemVO toItem(Map<String, Object> src) {
+    private List<LogItemVO> parseLokiResponse(String body) {
+        if (StringUtils.isBlank(body)) {
+            return Collections.emptyList();
+        }
+        JSONObject root = JSON.parseObject(body);
+        JSONObject data = root.getJSONObject("data");
+        if (data == null) {
+            return Collections.emptyList();
+        }
+        JSONArray result = data.getJSONArray("result");
+        if (result == null || result.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<LogItemVO> items = new ArrayList<>();
+        for (int i = 0; i < result.size(); i++) {
+            JSONObject streamObj = result.getJSONObject(i);
+            JSONObject stream = streamObj.getJSONObject("stream");
+            JSONArray values = streamObj.getJSONArray("values");
+            if (values == null) {
+                continue;
+            }
+            for (int j = 0; j < values.size(); j++) {
+                JSONArray pair = values.getJSONArray(j);
+                if (pair == null || pair.size() < 2) {
+                    continue;
+                }
+                String nanos = pair.getString(0);
+                String line = pair.getString(1);
+                items.add(toItem(stream, nanos, line));
+            }
+        }
+        return items;
+    }
+
+    private LogItemVO toItem(JSONObject stream, String nanos, String line) {
         LogItemVO vo = new LogItemVO();
-        vo.setTimestamp(Objects.toString(src.get("@timestamp"), null));
-        vo.setLevel(Objects.toString(src.get("level_text"), null));
-        vo.setService(Objects.toString(src.get("service"), null));
-        vo.setMessage(Objects.toString(src.get("message"), null));
-        vo.setBizMessage(Objects.toString(src.get("biz_message"), null));
-        vo.setTraceId(Objects.toString(src.get("traceId"), null));
-        vo.setLogger(Objects.toString(src.get("logger"), null));
-        vo.setThread(Objects.toString(src.get("thread"), null));
-        vo.setContainerName(Objects.toString(src.get("container_name"), null));
-        vo.setImageName(Objects.toString(src.get("image_name"), null));
-        vo.setSourceHost(Objects.toString(src.get("source_host"), null));
+        vo.setTimestamp(formatNanos(nanos));
+        vo.setMessage(line);
+        if (stream != null) {
+            vo.setService(firstNonBlank(stream.getString("service_name"), stream.getString("container_name")));
+            vo.setContainerName(stream.getString("container_name"));
+            vo.setLevel(normalizeLevel(stream.getString("detected_level")));
+            vo.setSourceHost(stream.getString("host"));
+        }
+
+        Matcher matcher = SPRING_LOG_PATTERN.matcher(line == null ? "" : line);
+        if (matcher.matches()) {
+            vo.setLevel(firstNonBlank(matcher.group("level"), vo.getLevel()));
+            vo.setThread(matcher.group("thread"));
+            vo.setTraceId(matcher.group("trace"));
+            vo.setLogger(matcher.group("logger"));
+            vo.setBizMessage(matcher.group("msg"));
+        }
+        if (StringUtils.isBlank(vo.getLevel())) {
+            vo.setLevel("UNKNOWN");
+        }
         return vo;
+    }
+
+    private String firstNonBlank(String first, String second) {
+        return StringUtils.isNotBlank(first) ? first : second;
+    }
+
+    private String normalizeLevel(String level) {
+        return StringUtils.isBlank(level) ? null : level.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private String formatNanos(String nanos) {
+        try {
+            long ns = Long.parseLong(nanos);
+            Instant instant = Instant.ofEpochSecond(ns / 1_000_000_000L, ns % 1_000_000_000L);
+            return instant.atZone(ZoneId.systemDefault()).toOffsetDateTime().toString();
+        } catch (Exception e) {
+            return nanos;
+        }
+    }
+
+    private static long timestampNanos(LogItemVO item) {
+        String timestamp = item.getTimestamp();
+        if (StringUtils.isBlank(timestamp)) {
+            return 0L;
+        }
+        try {
+            Instant instant = OffsetDateTime.parse(timestamp).toInstant();
+            return instant.getEpochSecond() * 1_000_000_000L + instant.getNano();
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
+
+    private static class LokiQueryWindow {
+        private final long startNanos;
+        private final long endNanos;
+
+        private LokiQueryWindow(long startNanos, long endNanos) {
+            this.startNanos = startNanos;
+            this.endNanos = endNanos;
+        }
     }
 }

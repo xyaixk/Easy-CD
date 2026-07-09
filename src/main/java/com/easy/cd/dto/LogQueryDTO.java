@@ -14,28 +14,28 @@ public class LogQueryDTO {
     /** 环境 ID（优先，与 envName 二选一） */
     private Long envId;
 
-    /** 环境名（用于拼接索引 logs-{envName}-*） */
+    /** 环境名（对应 Loki app_env 标签） */
     private String envName;
 
-    /** 服务列表（terms on service.keyword），多选 */
+    /** 服务列表（Loki service_name 标签），多选 */
     private List<String> services;
 
-    /** 级别列表（terms on level_text.keyword），多选，如 INFO/WARN/ERROR/DEBUG */
+    /** 级别列表（Loki detected_level 标签），多选，如 INFO/WARN/ERROR/DEBUG */
     private List<String> levels;
 
-    /** 关键字（match on message + biz_message） */
+    /** 关键字（Loki 行内容包含匹配） */
     private String keyword;
 
-    /** 链路 ID（term on traceId.keyword） */
+    /** 链路 ID（Loki 行内容包含匹配） */
     private String traceId;
 
-    /** Logger 类（prefix on logger.keyword） */
+    /** Logger 类（Loki 行内容包含匹配） */
     private String logger;
 
-    /** 容器名（wildcard on container_name.keyword） */
+    /** 容器名（Loki container_name 标签正则匹配） */
     private String containerName;
 
-    /** 线程（prefix on thread.keyword） */
+    /** 线程（Loki 行内容包含匹配） */
     private String thread;
 
     /** 时间范围预设：15m / 1h / 6h / 24h / custom */

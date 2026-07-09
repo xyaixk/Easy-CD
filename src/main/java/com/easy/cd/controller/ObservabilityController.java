@@ -18,7 +18,7 @@ import java.util.List;
 
 /**
  * 可观测性（日志）查询接口。
- * 数据源：OpenSearch（索引模式 logs-{env}-*）。
+ * 数据源：Loki。
  */
 @Slf4j
 @RestController
@@ -46,7 +46,7 @@ public class ObservabilityController {
     }
 
     /**
-     * 按筛选条件导出 CSV（受 max-result-window 限制）。
+     * 按筛选条件导出日志（受 max-result-window 限制）。
      */
     @PostMapping("/export")
     public void export(@RequestBody LogQueryDTO query, HttpServletResponse response) {

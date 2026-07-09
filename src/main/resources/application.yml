@@ -19,10 +19,9 @@ mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
 
-# OpenSearch日志检索配置
-opensearch:
-  uri: http://172.21.49.17:9200
-  # 索引模式：{env} 占位符会被当前环境名替换
-  index-pattern: logs-{env}-*
+# Loki日志检索配置
+loki:
+  uri: http://172.21.49.8:3100
+  namespace: ysb
   # 单次查询上限（取“全部”时也不超过此值）
-  max-result-window: 10000
+  max-result-window: 5000

@@ -14,7 +14,7 @@ import java.util.List;
 @AllArgsConstructor
 public class LogPageVO {
 
-    /** 命中总数（受 OpenSearch track_total_hits 限制） */
+    /** 命中总数（Loki 无精确 total，这里返回当前查询窗口内的估算分页总数） */
     private long total;
 
     /** 当前页数据 */

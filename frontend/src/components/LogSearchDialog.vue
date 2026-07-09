@@ -20,6 +20,7 @@ const selectedLevels = ref(['INFO', 'WARN', 'ERROR'])
 const timeRange = ref('1h')
 const customFrom = ref('')
 const customTo = ref('')
+const queryAnchorTo = ref('')
 // 已应用的自定义时间（仅在点击“应用”后同步），用于摘要显示
 const appliedFrom = ref('')
 const appliedTo = ref('')
@@ -69,9 +70,9 @@ const consoleRef = ref(null)
 
 // 当前锁定的环境名
 const lockedEnv = computed(() => props.currentEnvironment?.name || '')
-const totalPages = computed(() => pageSize.value === -1 ? 1 : Math.max(1, Math.ceil(total.value / pageSize.value)))
-const pageStart = computed(() => total.value === 0 ? 0 : (pageSize.value === -1 ? 1 : (currentPage.value - 1) * pageSize.value + 1))
-const pageEnd = computed(() => pageSize.value === -1 ? total.value : Math.min(total.value, currentPage.value * pageSize.value))
+const hasNextPage = computed(() => pageSize.value !== -1 && logs.value.length >= pageSize.value)
+const pageStart = computed(() => logs.value.length === 0 ? 0 : (pageSize.value === -1 ? 1 : (currentPage.value - 1) * pageSize.value + 1))
+const pageEnd = computed(() => logs.value.length === 0 ? 0 : pageStart.value + logs.value.length - 1)
 
 // ============ Mock 移除：服务名读数据库 app_service 表 ============
 const loadAvailableServices = async () => {
@@ -98,7 +99,7 @@ const buildQueryBody = () => ({
   thread: thread.value ? thread.value.trim() : null,
   timeRange: timeRange.value,
   from: timeRange.value === 'custom' ? (appliedFrom.value || customFrom.value || null) : null,
-  to: timeRange.value === 'custom' ? (appliedTo.value || customTo.value || null) : null,
+  to: timeRange.value === 'custom' ? (appliedTo.value || customTo.value || null) : (queryAnchorTo.value || null),
   page: currentPage.value,
   size: pageSize.value
 })
@@ -115,10 +116,7 @@ const search = async () => {
     // 为每行补上唯一 key（虚拟列表与展开依赖）
     logs.value = items.map((it, idx) => ({
       ...it,
-      key: `${it.timestamp || ''}-${it.traceId || ''}-${idx}`,
-      // 兼容原有模板：row.biz_message / row.container_name
-      biz_message: it.bizMessage,
-      container_name: it.containerName
+      key: `${it.timestamp || ''}-${it.traceId || ''}-${idx}`
     }))
     total.value = (data && data.total) || 0
   } catch (e) {
@@ -128,7 +126,11 @@ const search = async () => {
   }
 }
 
-const onSearch = () => { currentPage.value = 1; search() }
+const onSearch = () => {
+  currentPage.value = 1
+  queryAnchorTo.value = nowLocal()
+  search()
+}
 const reset = () => {
   keyword.value = ''; traceId.value = ''
   logger.value = ''; containerName.value = ''
@@ -138,6 +140,7 @@ const reset = () => {
   timeRange.value = '1h'
   customFrom.value = ''; customTo.value = ''
   appliedFrom.value = ''; appliedTo.value = ''
+  queryAnchorTo.value = nowLocal()
   showCustomPicker.value = false
   currentPage.value = 1; search()
 }
@@ -240,16 +243,27 @@ const pickTraceId = (tid) => { if (!tid) return; traceId.value = tid; onSearch()
 const toggleExpand = (k) => { expandedKey.value = expandedKey.value === k ? null : k }
 
 const goPage = (p) => {
-  if (p < 1 || p > totalPages.value || p === currentPage.value) return
+  if (p < 1 || p === currentPage.value) return
+  if (p > currentPage.value && !hasNextPage.value) return
   currentPage.value = p; search()
 }
-const onPageSizeChange = () => { currentPage.value = 1; search() }
+const onPageSizeChange = () => {
+  currentPage.value = 1
+  queryAnchorTo.value = nowLocal()
+  search()
+}
 
 // 自动刷新
 const setupAutoRefresh = () => {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
   if (autoRefreshInterval.value > 0 && props.visible) {
-    refreshTimer = setInterval(() => { if (!isLoading.value) search() }, autoRefreshInterval.value)
+    refreshTimer = setInterval(() => {
+      if (!isLoading.value) {
+        currentPage.value = 1
+        queryAnchorTo.value = nowLocal()
+        search()
+      }
+    }, autoRefreshInterval.value)
   }
 }
 watch(autoRefreshInterval, setupAutoRefresh)
@@ -298,6 +312,7 @@ watch(() => props.visible, (v) => {
     scrollTop.value = 0
     document.body.style.overflow = 'hidden'
     currentPage.value = 1
+    queryAnchorTo.value = nowLocal()
     loadAvailableServices()
     search()
     setupAutoRefresh()
@@ -315,6 +330,7 @@ watch(() => props.visible, (v) => {
 watch(() => props.currentEnvironment?.id, () => {
   if (props.visible) {
     currentPage.value = 1
+    queryAnchorTo.value = nowLocal()
     loadAvailableServices()
     search()
   }
@@ -352,7 +368,7 @@ const shortTrace = (t) => (t ? t.slice(0, 8) + '…' : '-')
               <div>
                 <h3>日志查询</h3>
                 <p class="header-sub">
-                  基于 OpenSearch 的全局日志检索
+                  基于 Loki 的全局日志检索
                   <span v-if="lockedEnv" class="env-badge">环境：{{ lockedEnv }}</span>
                   <span v-else class="env-badge env-badge-warn">未选择环境</span>
                 </p>
@@ -501,7 +517,7 @@ const shortTrace = (t) => (t ? t.slice(0, 8) + '…' : '-')
                     <td class="col-time mono">{{ formatTime(row.timestamp) }}</td>
                     <td class="col-svc">{{ row.service }}</td>
                     <td class="col-lv"><span class="lv-tag" :class="levelClass(row.level)">{{ row.level }}</span></td>
-                    <td class="col-msg">{{ row.biz_message || row.message }}</td>
+                    <td class="col-msg">{{ row.bizMessage || row.message }}</td>
                     <td class="col-trace mono">
                       <a v-if="row.traceId" href="#" @click.stop.prevent="pickTraceId(row.traceId)">{{ shortTrace(row.traceId) }}</a>
                       <span v-else class="muted">-</span>
@@ -511,9 +527,9 @@ const shortTrace = (t) => (t ? t.slice(0, 8) + '…' : '-')
                     <td colspan="5">
                       <div class="detail-grid">
                         <div><span class="k">logger</span><span class="v mono">{{ row.logger }}</span></div>
-                        <div><span class="k">container_name</span><span class="v mono">{{ row.container_name }}</span></div>
-                        <div><span class="k">image_name</span><span class="v mono">{{ row.image_name }}</span></div>
-                        <div><span class="k">source_host</span><span class="v mono">{{ row.source_host }}</span></div>
+                        <div><span class="k">container_name</span><span class="v mono">{{ row.containerName }}</span></div>
+                        <div><span class="k">image_name</span><span class="v mono">{{ row.imageName }}</span></div>
+                        <div><span class="k">source_host</span><span class="v mono">{{ row.sourceHost }}</span></div>
                         <div><span class="k">thread</span><span class="v mono">{{ row.thread }}</span></div>
                         <div><span class="k">traceId</span><span class="v mono">{{ row.traceId || '-' }}</span></div>
                       </div>
@@ -529,7 +545,7 @@ const shortTrace = (t) => (t ? t.slice(0, 8) + '…' : '-')
             <div v-else class="console-view" ref="consoleRef">
               <div v-if="useVirtual && topPad > 0" :style="{ height: topPad + 'px' }"></div>
               <div v-for="row in visibleLogs" :key="row.key" class="console-line"><!--
-             --><span class="c-time">{{ formatTime(row.timestamp) }}</span> <span class="c-lv" :class="levelClass(row.level)">{{ row.level.padEnd(5, ' ') }}</span> <span class="c-svc">{{ row.service }}</span> <span class="c-thread">[{{ row.thread }}]</span> <span class="c-logger">{{ row.logger }}</span> <span class="c-trace"><a v-if="row.traceId" href="#" @click.stop.prevent="pickTraceId(row.traceId)">({{ shortTrace(row.traceId) }})</a><span v-else>(-)</span></span> <span class="c-msg">{{ row.biz_message || row.message }}</span>
+             --><span class="c-time">{{ formatTime(row.timestamp) }}</span> <span class="c-lv" :class="levelClass(row.level)">{{ row.level.padEnd(5, ' ') }}</span> <span class="c-svc">{{ row.service }}</span> <span class="c-thread">[{{ row.thread }}]</span> <span class="c-logger">{{ row.logger }}</span> <span class="c-trace"><a v-if="row.traceId" href="#" @click.stop.prevent="pickTraceId(row.traceId)">({{ shortTrace(row.traceId) }})</a><span v-else>(-)</span></span> <span class="c-msg">{{ row.bizMessage || row.message }}</span>
               </div>
               <div v-if="useVirtual && bottomPad > 0" :style="{ height: bottomPad + 'px' }"></div>
             </div>
@@ -537,7 +553,7 @@ const shortTrace = (t) => (t ? t.slice(0, 8) + '…' : '-')
 
           <!-- 底部分页栏 -->
           <div class="pagination">
-            <span class="pg-info">第 {{ pageStart }} - {{ pageEnd }} 条 / 共 <b>{{ total }}</b> 条</span>
+            <span class="pg-info">第 {{ pageStart }} - {{ pageEnd }} 条</span>
 
             <div class="grow"></div>
 
@@ -550,9 +566,8 @@ const shortTrace = (t) => (t ? t.slice(0, 8) + '…' : '-')
             <div class="pg-buttons">
               <button class="pg-btn" :disabled="currentPage <= 1" @click="goPage(1)">首页</button>
               <button class="pg-btn" :disabled="currentPage <= 1" @click="goPage(currentPage - 1)">上一页</button>
-              <span class="pg-current">{{ currentPage }} / {{ totalPages }}</span>
-              <button class="pg-btn" :disabled="currentPage >= totalPages" @click="goPage(currentPage + 1)">下一页</button>
-              <button class="pg-btn" :disabled="currentPage >= totalPages" @click="goPage(totalPages)">末页</button>
+              <span class="pg-current">第 {{ currentPage }} 页</span>
+              <button class="pg-btn" :disabled="!hasNextPage" @click="goPage(currentPage + 1)">下一页</button>
             </div>
             <div class="seg-group" title="视图模式">
               <button class="seg" :class="{ active: viewMode === 'table' }" @click="viewMode = 'table'">
