@@ -70,32 +70,11 @@ CREATE TABLE `replica_metrics`  (
   `replica_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '副本名称',
   `platform` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '部署平台：docker, k8s',
   `node_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '所在节点名称',
-  `namespace` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'K8s命名空间',
   `status` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '当前状态',
-  `phase` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'K8s Pod Phase',
-  `previous_status` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '上一次的状态（用于检测状态变更）',
-  `previous_phase` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '上一次的Phase',
-  `is_status_changed` tinyint(1) NULL DEFAULT 0 COMMENT '本次采集是否发生状态变更',
   `cpu_percent` decimal(5, 2) NULL DEFAULT NULL COMMENT 'CPU使用率（百分比，0-100）',
   `memory_usage` bigint NULL DEFAULT NULL COMMENT '内存使用量（字节）',
   `memory_limit` bigint NULL DEFAULT NULL COMMENT '内存限制（字节）',
   `memory_percent` decimal(5, 2) NULL DEFAULT NULL COMMENT '内存使用率（百分比，0-100）',
-  `network_rx_bytes` bigint NULL DEFAULT NULL COMMENT '网络接收总字节数',
-  `network_tx_bytes` bigint NULL DEFAULT NULL COMMENT '网络发送总字节数',
-  `network_rx_rate` bigint NULL DEFAULT NULL COMMENT '网络接收速率（字节/秒）',
-  `network_tx_rate` bigint NULL DEFAULT NULL COMMENT '网络发送速率（字节/秒）',
-  `disk_read_bytes` bigint NULL DEFAULT NULL COMMENT '磁盘读取总字节数',
-  `disk_write_bytes` bigint NULL DEFAULT NULL COMMENT '磁盘写入总字节数',
-  `disk_read_rate` bigint NULL DEFAULT NULL COMMENT '磁盘读取速率（字节/秒）',
-  `disk_write_rate` bigint NULL DEFAULT NULL COMMENT '磁盘写入速率（字节/秒）',
-  `uptime_seconds` bigint NULL DEFAULT NULL COMMENT '运行时间（秒）',
-  `restart_count` int NULL DEFAULT 0 COMMENT '重启次数',
-  `error_message` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL COMMENT '错误信息',
-  `exit_code` int NULL DEFAULT NULL COMMENT '退出码',
-  `termination_reason` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '终止原因',
-  `event_type` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '事件类型：Normal, Warning, Error',
-  `event_reason` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '事件原因（K8s Event Reason）',
-  `event_message` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL COMMENT '事件消息',
   `collected_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '采集时间',
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_replica_status_id`(`replica_status_id` ASC) USING BTREE,
@@ -105,10 +84,8 @@ CREATE TABLE `replica_metrics`  (
   INDEX `idx_status`(`status` ASC) USING BTREE,
   INDEX `idx_collected_time`(`collected_time` ASC) USING BTREE,
   INDEX `idx_service_collected`(`service_id` ASC, `collected_time` ASC) USING BTREE,
-  INDEX `idx_replica_collected`(`replica_id` ASC, `collected_time` ASC) USING BTREE,
-  INDEX `idx_status_changed`(`is_status_changed` ASC, `collected_time` ASC) USING BTREE,
-  INDEX `idx_event_type`(`event_type` ASC) USING BTREE
-) ENGINE = InnoDB AUTO_INCREMENT = 816 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '副本监控指标表（包含状态变更历史）' ROW_FORMAT = Dynamic;
+  INDEX `idx_replica_collected`(`replica_id` ASC, `collected_time` ASC) USING BTREE
+) ENGINE = InnoDB AUTO_INCREMENT = 1 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '副本监控指标表（每1s一行时序数据）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for replica_status
@@ -167,29 +144,6 @@ CREATE TABLE `replica_status`  (
 ) ENGINE = InnoDB AUTO_INCREMENT = 12 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '副本状态表（兼容Docker和K8s）' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
--- Table structure for service_metrics
--- ----------------------------
-DROP TABLE IF EXISTS `service_metrics`;
-CREATE TABLE `service_metrics`  (
-  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
-  `service_id` bigint NOT NULL COMMENT '关联的服务ID',
-  `cpu_percent` decimal(5, 2) NULL DEFAULT NULL COMMENT 'CPU使用率（百分比，0-100）',
-  `memory_usage` bigint NULL DEFAULT NULL COMMENT '内存使用量（字节）',
-  `memory_limit` bigint NULL DEFAULT NULL COMMENT '内存限制（字节）',
-  `memory_percent` decimal(5, 2) NULL DEFAULT NULL COMMENT '内存使用率（百分比，0-100）',
-  `network_rx_rate` bigint NULL DEFAULT NULL COMMENT '网络接收速率（字节/秒）',
-  `network_tx_rate` bigint NULL DEFAULT NULL COMMENT '网络发送速率（字节/秒）',
-  `disk_read_rate` bigint NULL DEFAULT NULL COMMENT '磁盘读取速率（字节/秒）',
-  `disk_write_rate` bigint NULL DEFAULT NULL COMMENT '磁盘写入速率（字节/秒）',
-  `collected_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '采集时间',
-  `created_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  PRIMARY KEY (`id`) USING BTREE,
-  INDEX `idx_service_id`(`service_id` ASC) USING BTREE,
-  INDEX `idx_collected_time`(`collected_time` ASC) USING BTREE,
-  INDEX `idx_service_collected`(`service_id` ASC, `collected_time` ASC) USING BTREE
-) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '服务监控指标表' ROW_FORMAT = Dynamic;
-
--- ----------------------------
 -- Table structure for service_status
 -- ----------------------------
 DROP TABLE IF EXISTS `service_status`;
@@ -222,5 +176,98 @@ CREATE TABLE `cd_user`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_username`(`username` ASC) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '用户表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for host_info（监控 · 宿主机静态信息）
+-- ----------------------------
+DROP TABLE IF EXISTS `host_info`;
+CREATE TABLE `host_info` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `environment_id` bigint NOT NULL COMMENT '环境ID',
+  `host_key` varchar(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '主机唯一键 user@ip:port',
+  `ip` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'IP地址',
+  `hostname` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '主机名',
+  `swarm_node_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'Swarm 节点 ID',
+  `swarm_role` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'manager/worker',
+  `swarm_status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'ready/down',
+  `cpu_cores` int NULL DEFAULT NULL COMMENT 'CPU 核数',
+  `mem_total` bigint NULL DEFAULT NULL COMMENT '总内存（字节）',
+  `disk_total` bigint NULL DEFAULT NULL COMMENT '根分区总量（字节）',
+  `last_seen_time` datetime NULL DEFAULT NULL COMMENT '最近一次采集成功时间',
+  `created_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_time` datetime NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_env_host_key`(`environment_id`, `host_key`) USING BTREE,
+  INDEX `idx_env`(`environment_id`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '宿主机静态信息表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for host_metrics（监控 · 宿主机时序指标 1s）
+-- ----------------------------
+DROP TABLE IF EXISTS `host_metrics`;
+CREATE TABLE `host_metrics` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `host_id` bigint NOT NULL COMMENT '关联 host_info.id',
+  `environment_id` bigint NOT NULL COMMENT '环境ID',
+  `cpu_percent` decimal(5,2) NULL DEFAULT NULL COMMENT 'CPU使用率0-100',
+  `load1` decimal(10,2) NULL DEFAULT NULL COMMENT '1分钟负载',
+  `load5` decimal(10,2) NULL DEFAULT NULL COMMENT '5分钟负载',
+  `load15` decimal(10,2) NULL DEFAULT NULL COMMENT '15分钟负载',
+  `mem_used` bigint NULL DEFAULT NULL COMMENT '内存已用（字节）',
+  `mem_total` bigint NULL DEFAULT NULL COMMENT '内存总量（字节）',
+  `mem_percent` decimal(5,2) NULL DEFAULT NULL COMMENT '内存使用率0-100',
+  `disk_used` bigint NULL DEFAULT NULL COMMENT '根分区已用（字节）',
+  `disk_total` bigint NULL DEFAULT NULL COMMENT '根分区总量（字节）',
+  `disk_percent` decimal(5,2) NULL DEFAULT NULL COMMENT '根分区使用率0-100',
+  `collected_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '采集时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_host_collected`(`host_id`, `collected_time`) USING BTREE,
+  INDEX `idx_env_collected`(`environment_id`, `collected_time`) USING BTREE,
+  INDEX `idx_collected`(`collected_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '宿主机时序指标表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for alert_rule（监控 · 告警规则）
+-- ----------------------------
+DROP TABLE IF EXISTS `alert_rule`;
+CREATE TABLE `alert_rule` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `name` varchar(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '规则名称',
+  `enabled` tinyint(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
+  `target_type` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'host/service',
+  `metric` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '指标 key',
+  `comparator` varchar(4) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '> < >= <=',
+  `threshold` decimal(12,2) NOT NULL COMMENT '阈值',
+  `duration_seconds` int NOT NULL DEFAULT 60 COMMENT '持续多少秒满足条件才触发',
+  `severity` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL DEFAULT 'warning' COMMENT 'info/warning/critical',
+  `description` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '描述',
+  `created_time` datetime NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_time` datetime NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_enabled`(`enabled`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '告警规则表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for alert_event（监控 · 告警事件）
+-- ----------------------------
+DROP TABLE IF EXISTS `alert_event`;
+CREATE TABLE `alert_event` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `rule_id` bigint NOT NULL COMMENT '关联 alert_rule.id',
+  `target_type` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'host/service',
+  `target_key` varchar(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '目标 ID',
+  `metric` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+  `value` decimal(12,2) NULL DEFAULT NULL COMMENT '触发时观测值',
+  `threshold` decimal(12,2) NULL DEFAULT NULL COMMENT '触发时阈值',
+  `status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'firing/resolved',
+  `fired_time` datetime NOT NULL COMMENT '触发时间',
+  `resolved_time` datetime NULL DEFAULT NULL COMMENT '恢复时间',
+  `message` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '描述',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_status`(`status`) USING BTREE,
+  INDEX `idx_rule`(`rule_id`) USING BTREE,
+  INDEX `idx_target`(`target_type`, `target_key`) USING BTREE,
+  INDEX `idx_fired_time`(`fired_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '告警事件表' ROW_FORMAT = Dynamic;
 
 SET FOREIGN_KEY_CHECKS = 1;

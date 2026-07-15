@@ -6,7 +6,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
-@MapperScan("com.easy.cd.mapper")
+@MapperScan({"com.easy.cd.mapper", "com.easy.cd.monitor.mapper"})
 @EnableScheduling
 public class CdPlatformApplication {
     public static void main(String[] args) {

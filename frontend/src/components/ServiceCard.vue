@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import ServiceActionMenu from './ServiceActionMenu.vue'
+import SparkLine from './monitor/SparkLine.vue'
 
 const props = defineProps({
   service: {
@@ -8,6 +9,64 @@ const props = defineProps({
     required: true
   }
 })
+
+// 回退：后端 sparkline 未接入前使用本地生成的伪时序（真实指标接入后 service.cpuSpark/memSpark 优先）
+const genFallbackSpark = (base = 20) => {
+  const arr = []
+  let cur = Math.max(5, Math.min(90, Number(base) || 20))
+  for (let i = 0; i < 20; i++) {
+    cur += (Math.random() - 0.5) * 10
+    cur = Math.max(0, Math.min(100, cur))
+    arr.push(Number(cur.toFixed(1)))
+  }
+  return arr
+}
+
+// 聚合模式：avg 平均 / max 副本中最高（默认 max，更容易定位异常副本）
+const metricMode = ref('max')
+const toggleMetricMode = () => {
+  metricMode.value = metricMode.value === 'avg' ? 'max' : 'avg'
+}
+
+// 根据当前模式挑选服务对象上的字段
+// 真实字段：cpuPercent/memoryPercent/cpuSpark/memSpark（AVG）
+//         cpuPercentMax/memoryPercentMax/cpuSparkMax/memSparkMax（MAX）
+const cpuValue = computed(() => {
+  const v = metricMode.value === 'max' ? props.service.cpuPercentMax : props.service.cpuPercent
+  // MAX 模式下若后端未提供，回退为 AVG × 1.6 clamp 100
+  if (metricMode.value === 'max' && v == null && props.service.cpuPercent != null) {
+    return Math.min(100, Math.round(props.service.cpuPercent * 1.6))
+  }
+  return v
+})
+
+const memValue = computed(() => {
+  const v = metricMode.value === 'max' ? props.service.memoryPercentMax : props.service.memoryPercent
+  if (metricMode.value === 'max' && v == null && props.service.memoryPercent != null) {
+    return Math.min(100, Math.round(props.service.memoryPercent * 1.4))
+  }
+  return v
+})
+
+const cpuSparkPoints = computed(() => {
+  const key = metricMode.value === 'max' ? 'cpuSparkMax' : 'cpuSpark'
+  if (Array.isArray(props.service[key]) && props.service[key].length > 0) return props.service[key]
+  return genFallbackSpark(cpuValue.value ?? 15)
+})
+
+const memSparkPoints = computed(() => {
+  const key = metricMode.value === 'max' ? 'memSparkMax' : 'memSpark'
+  if (Array.isArray(props.service[key]) && props.service[key].length > 0) return props.service[key]
+  return genFallbackSpark(memValue.value ?? 30)
+})
+
+const cpuPercentDisplay = computed(() => (cpuValue.value != null ? `${Math.round(cpuValue.value)}%` : '-'))
+const memPercentDisplay = computed(() => (memValue.value != null ? `${Math.round(memValue.value)}%` : '-'))
+
+const modeLabel = computed(() => (metricMode.value === 'max' ? 'MAX' : 'AVG'))
+const modeTooltip = computed(() =>
+  metricMode.value === 'avg' ? '点击切换到 MAX（副本中最高值）' : '点击切换到 AVG（副本平均值）'
+)
 
 const emit = defineEmits(['update', 'rollback', 'restart', 'stop', 'scale', 'view', 'edit', 'delete'])
 
@@ -59,13 +118,18 @@ const memoryDisplay = computed(() => {
   const usage = props.service.memoryUsage
   return formatBytes(usage)
 })
+
+const descriptionText = computed(() => {
+  const description = props.service.description
+  return description && description.trim() ? description : '暂无描述'
+})
 </script>
 
 <template>
   <div class="service-card">
     <div class="service-header">
-      <div class="service-title-section">
-        <h3 class="service-name">{{ service.name }}</h3>
+      <h3 class="service-name" :title="service.name">{{ service.name }}</h3>
+      <div class="service-meta-row">
         <span 
           class="service-status"
           :style="{ '--status-color': getStatusColor(service.status) }"
@@ -73,15 +137,28 @@ const memoryDisplay = computed(() => {
           <span class="status-dot" :class="{ 'spinning': service.status === 'deploying' }"></span>
           {{ getStatusText(service.status) }}
         </span>
-        <span v-if="service.serviceMode === 'global'" class="service-mode-badge" title="全局模式：每个 Swarm 节点自动运行 1 个副本">
-          GLOBAL
-        </span>
+        <span v-if="service.version" class="service-version">{{ service.version }}</span>
       </div>
-      <span class="service-version">{{ service.version }}</span>
     </div>
     
-    <p class="service-description">{{ service.description }}</p>
+    <p class="service-description" :class="{ placeholder: !service.description || !service.description.trim() }">
+      {{ descriptionText }}
+    </p>
     
+    <div class="metrics-section" :title="modeTooltip" @click.stop="toggleMetricMode">
+      <span class="metric-mode-tag" :class="metricMode">{{ modeLabel }}</span>
+      <div class="metric-row">
+        <span class="metric-label">CPU</span>
+        <span class="metric-value cpu">{{ cpuPercentDisplay }}</span>
+        <SparkLine :points="cpuSparkPoints" :width="120" :height="18" color="#667eea" :fill="true" />
+      </div>
+      <div class="metric-row">
+        <span class="metric-label">MEM</span>
+        <span class="metric-value mem">{{ memPercentDisplay }}</span>
+        <SparkLine :points="memSparkPoints" :width="120" :height="18" color="#f5a623" :fill="true" />
+      </div>
+    </div>
+
     <div class="replicas-section">
       <div class="replicas-display">
         <span class="replica-value healthy">{{ service.healthyInstances }}</span>
@@ -90,8 +167,13 @@ const memoryDisplay = computed(() => {
         <span class="replica-value running">{{ service.instances }}</span>
         <span class="replica-label">运行</span>
         <span class="replica-divider">/</span>
-        <span class="replica-value desired">{{ service.desiredInstances }}</span>
-        <span class="replica-label">期望</span>
+        <template v-if="service.serviceMode === 'global'">
+          <span class="replica-label">Global</span>
+        </template>
+        <template v-else>
+          <span class="replica-value desired">{{ service.desiredInstances }}</span>
+          <span class="replica-label">期望</span>
+        </template>
       </div>
     </div>
     
@@ -127,21 +209,23 @@ const memoryDisplay = computed(() => {
 }
 
 .service-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
   margin-bottom: 0.75rem;
-}
-
-.service-title-section {
-  flex: 1;
 }
 
 .service-name {
   font-size: 1rem;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.service-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 
@@ -158,19 +242,6 @@ const memoryDisplay = computed(() => {
   font-weight: 600;
 }
 
-.service-mode-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 0.5rem;
-  padding: 0.2rem 0.5rem;
-  border-radius: 4px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  color: #fff;
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  vertical-align: middle;
-}
 
 .replicas-section {
   padding: 0.625rem 1rem;
@@ -178,6 +249,86 @@ const memoryDisplay = computed(() => {
   border-radius: 8px;
   margin-bottom: 0.875rem;
   text-align: center;
+}
+
+.metrics-section {
+  position: relative;
+  padding: 0.55rem 0.85rem;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  margin-bottom: 0.625rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  cursor: pointer;
+  transition: background 0.18s;
+}
+
+.metrics-section:hover {
+  background: var(--bg-hover);
+}
+
+.metric-mode-tag {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  font-family: 'Courier New', monospace;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.7;
+  transition: opacity 0.18s, color 0.18s;
+}
+
+.metrics-section:hover .metric-mode-tag {
+  opacity: 1;
+}
+
+.metric-mode-tag.avg {
+  color: var(--primary-color);
+}
+
+.metric-mode-tag.max {
+  color: var(--warning-color);
+}
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.72rem;
+}
+
+.metric-label {
+  font-weight: 700;
+  color: var(--text-secondary);
+  width: 32px;
+  letter-spacing: 0.03em;
+}
+
+.metric-value {
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  font-size: 0.82rem;
+  width: 42px;
+  text-align: right;
+}
+
+.metric-value.cpu {
+  color: var(--primary-color);
+}
+
+.metric-value.mem {
+  color: #f5a623;
+}
+
+.metric-row :deep(.sparkline) {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
 }
 
 .replicas-display {
@@ -247,15 +398,14 @@ const memoryDisplay = computed(() => {
 }
 
 .service-version {
-  padding: 0.25rem 0.625rem;
+  padding: 0.2rem 0.5rem;
   background: var(--bg-hover);
-  border-radius: 6px;
-  font-size: 0.8rem;
+  border-radius: 5px;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--text-secondary);
   font-family: 'Courier New', monospace;
   white-space: nowrap;
-  flex-shrink: 0;
 }
 
 .service-description {
@@ -263,6 +413,11 @@ const memoryDisplay = computed(() => {
   font-size: 0.85rem;
   line-height: 1.5;
   margin-bottom: 0.875rem;
+  min-height: 1.275rem;
+}
+
+.service-description.placeholder {
+  color: var(--text-tertiary);
 }
 
 .service-info {

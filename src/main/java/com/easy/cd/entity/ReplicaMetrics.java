@@ -8,64 +8,41 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 副本监控指标表（包含状态变更历史）
+ * 副本监控指标表（每 1s 一行时序数据）
+ *
+ * 极简策略：仅保留 4 个核心数值指标 + 归属键 + 时间戳。
+ * 网络/磁盘 IO / 状态变更追踪 / K8s 特有字段已从表中移除。
  */
 @Data
 @TableName("replica_metrics")
 public class ReplicaMetrics {
-    
+
     @TableId(type = IdType.AUTO)
     private Long id;
-    
+
+    // ==================== 归属键 ====================
     private Long replicaStatusId;
     private Long serviceId;
     private String replicaId;
     private String replicaName;
-    
-    // 平台和节点信息
+
+    /** 部署平台：docker / k8s */
     private String platform;
+    /** 所在节点名称 */
     private String nodeName;
-    private String namespace;
-    
-    // 状态信息（用于追踪状态变更）
+    /** 当前状态（running / exited / ...） */
     private String status;
-    private String phase;
-    private String previousStatus;
-    private String previousPhase;
-    private Boolean isStatusChanged;
-    
-    // CPU指标
+
+    // ==================== 核心指标 ====================
+    /** CPU 使用率（0-100） */
     private Double cpuPercent;
-    
-    // 内存指标
+    /** 内存使用量（字节） */
     private Long memoryUsage;
+    /** 内存限制（字节） */
     private Long memoryLimit;
+    /** 内存使用率（0-100） */
     private Double memoryPercent;
-    
-    // 网络指标
-    private Long networkRxBytes;
-    private Long networkTxBytes;
-    private Long networkRxRate;
-    private Long networkTxRate;
-    
-    // 磁盘I/O指标
-    private Long diskReadBytes;
-    private Long diskWriteBytes;
-    private Long diskReadRate;
-    private Long diskWriteRate;
-    
-    // 运行时信息
-    private Long uptimeSeconds;
-    private Integer restartCount;
-    
-    // 错误和事件信息
-    private String errorMessage;
-    private Integer exitCode;
-    private String terminationReason;
-    private String eventType;
-    private String eventReason;
-    private String eventMessage;
-    
-    // 时间戳
+
+    // ==================== 时间戳 ====================
     private LocalDateTime collectedTime;
 }

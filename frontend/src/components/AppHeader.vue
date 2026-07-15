@@ -109,12 +109,13 @@ const currentEnvironment = computed(() => {
 
 <style scoped>
 .header {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: var(--primary-gradient);
   border-bottom: none;
-  box-shadow: 0 4px 20px rgba(102, 126, 234, 0.15);
+  box-shadow: var(--header-shadow);
   position: sticky;
   top: 0;
   z-index: 100;
+  transition: background 0.3s ease, box-shadow 0.3s ease;
 }
 
 .header-content {

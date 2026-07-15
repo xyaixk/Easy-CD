@@ -4,7 +4,6 @@ import com.easy.cd.deploy.factory.DeployStrategyFactory;
 import com.easy.cd.deploy.model.DeployRequest;
 import com.easy.cd.deploy.model.DeployResult;
 import com.easy.cd.dto.ImageVersionDTO;
-import com.easy.cd.dto.ServiceMetricsInfo;
 import com.easy.cd.dto.ServiceStatusInfo;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
@@ -111,14 +110,6 @@ public class DeployService {
     public List<ServiceStatusInfo> collectServiceStatus(String deployType, Environment environment, List<AppService> services) {
         DeployStrategy strategy = strategyFactory.getStrategy(deployType);
         return strategy.collectServiceStatus(environment, services);
-    }
-    
-    /**
-     * 收集服务监控指标
-     */
-    public List<ServiceMetricsInfo> collectServiceMetrics(String deployType, Environment environment, List<AppService> services) {
-        DeployStrategy strategy = strategyFactory.getStrategy(deployType);
-        return strategy.collectServiceMetrics(environment, services);
     }
     
     /**

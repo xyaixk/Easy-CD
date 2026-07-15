@@ -4,7 +4,6 @@ import com.easy.cd.deploy.DeployStrategy;
 import com.easy.cd.deploy.model.DeployRequest;
 import com.easy.cd.deploy.model.DeployResult;
 import com.easy.cd.dto.ImageVersionDTO;
-import com.easy.cd.dto.ServiceMetricsInfo;
 import com.easy.cd.dto.ServiceStatusInfo;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
@@ -125,12 +124,6 @@ public class K8sDeployStrategy implements DeployStrategy {
     @Override
     public List<ServiceStatusInfo> collectServiceStatus(Environment environment, List<AppService> services) {
         // TODO: 实现K8s服务状态收集
-        return new ArrayList<>();
-    }
-    
-    @Override
-    public List<ServiceMetricsInfo> collectServiceMetrics(Environment environment, List<AppService> services) {
-        // TODO: 实现K8s服务指标收集
         return new ArrayList<>();
     }
     

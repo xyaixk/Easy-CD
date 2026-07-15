@@ -1,0 +1,20 @@
+2026-07-09T03:39:59.642Z | INFO | Starting MCP MySQL server from: D:\scoop\persist\nodejs24\cache\_npx\080bc9f59514dad9\node_modules\@liangshanli\mcp-server-mysql\src\server-final.js
+2026-07-09T03:39:59.646Z | INFO | Starting MCP MySQL server with environment: | {"MYSQL_HOST":"10.10.0.58","MYSQL_PORT":"3306","MYSQL_USER":"root","MYSQL_DATABASE":"lims_crm","READONLY":"false","ALLOW_DDL":"true","ALLOW_DROP":"false","ALLOW_DELETE":"true","TOOL_PREFIX":"(not set)","PROJECT_NAME":"(not set)","MCP_LOG_DIR":"./.setting","MCP_DDL_LOG_FILE":"ddl.sql"}
+2026-07-09T03:39:59.676Z | INFO | MCP MySQL server process started with PID: 8704
+2026-07-09T03:39:59.677Z | INFO | Signal handlers registered for SIGINT and SIGTERM
+2026-07-09T03:39:59.678Z | INFO | Press Ctrl+C to gracefully shutdown the server
+2026-07-09T03:41:43.643Z | INFO | Starting MCP MySQL server from: D:\scoop\persist\nodejs24\cache\_npx\080bc9f59514dad9\node_modules\@liangshanli\mcp-server-mysql\src\server-final.js
+2026-07-09T03:41:43.645Z | INFO | Starting MCP MySQL server with environment: | {"MYSQL_HOST":"10.10.0.58","MYSQL_PORT":"3306","MYSQL_USER":"root","MYSQL_DATABASE":"lims_crm","READONLY":"false","ALLOW_DDL":"true","ALLOW_DROP":"false","ALLOW_DELETE":"true","TOOL_PREFIX":"(not set)","PROJECT_NAME":"(not set)","MCP_LOG_DIR":"./.setting","MCP_DDL_LOG_FILE":"ddl.sql"}
+2026-07-09T03:41:43.675Z | INFO | MCP MySQL server process started with PID: 7792
+2026-07-09T03:41:43.675Z | INFO | Signal handlers registered for SIGINT and SIGTERM
+2026-07-09T03:41:43.675Z | INFO | Press Ctrl+C to gracefully shutdown the server
+2026-07-13T01:47:38.021Z | INFO | Starting MCP MySQL server from: D:\scoop\persist\nodejs24\cache\_npx\080bc9f59514dad9\node_modules\@liangshanli\mcp-server-mysql\src\server-final.js
+2026-07-13T01:47:38.023Z | INFO | Starting MCP MySQL server with environment: | {"MYSQL_HOST":"10.10.0.58","MYSQL_PORT":"3306","MYSQL_USER":"root","MYSQL_DATABASE":"lims_crm","READONLY":"false","ALLOW_DDL":"true","ALLOW_DROP":"false","ALLOW_DELETE":"true","TOOL_PREFIX":"(not set)","PROJECT_NAME":"(not set)","MCP_LOG_DIR":"./.setting","MCP_DDL_LOG_FILE":"ddl.sql"}
+2026-07-13T01:47:38.045Z | INFO | MCP MySQL server process started with PID: 4232
+2026-07-13T01:47:38.046Z | INFO | Signal handlers registered for SIGINT and SIGTERM
+2026-07-13T01:47:38.046Z | INFO | Press Ctrl+C to gracefully shutdown the server
+2026-07-13T02:10:50.387Z | INFO | Starting MCP MySQL server from: D:\scoop\persist\nodejs24\cache\_npx\080bc9f59514dad9\node_modules\@liangshanli\mcp-server-mysql\src\server-final.js
+2026-07-13T02:10:50.389Z | INFO | Starting MCP MySQL server with environment: | {"MYSQL_HOST":"10.10.0.58","MYSQL_PORT":"3306","MYSQL_USER":"root","MYSQL_DATABASE":"lims_crm","READONLY":"false","ALLOW_DDL":"true","ALLOW_DROP":"false","ALLOW_DELETE":"true","TOOL_PREFIX":"(not set)","PROJECT_NAME":"(not set)","MCP_LOG_DIR":"./.setting","MCP_DDL_LOG_FILE":"ddl.sql"}
+2026-07-13T02:10:50.412Z | INFO | MCP MySQL server process started with PID: 7848
+2026-07-13T02:10:50.412Z | INFO | Signal handlers registered for SIGINT and SIGTERM
+2026-07-13T02:10:50.412Z | INFO | Press Ctrl+C to gracefully shutdown the server

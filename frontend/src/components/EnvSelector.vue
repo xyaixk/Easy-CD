@@ -60,7 +60,7 @@ onUnmounted(() => {
     <!-- 环境徽章 -->
     <button 
       class="env-badge" 
-      :style="{ '--env-color': currentEnvironment?.color || '#667eea' }"
+      :style="{ '--env-color': currentEnvironment?.color || 'var(--primary-color)' }"
       @click.stop="showEnvSelector = !showEnvSelector"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -188,7 +188,7 @@ onUnmounted(() => {
   width: 280px;
   background: white;
   border-radius: 12px;
-  box-shadow: 0 10px 40px rgba(102, 126, 234, 0.25);
+  box-shadow: 0 10px 40px var(--primary-shadow);
   overflow: hidden;
   z-index: 1000;
   animation: slideDown 0.2s ease;
@@ -336,6 +336,6 @@ onUnmounted(() => {
 
 .env-add-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+  box-shadow: 0 4px 12px var(--primary-shadow);
 }
 </style>

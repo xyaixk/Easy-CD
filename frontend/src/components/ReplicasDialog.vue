@@ -1,7 +1,9 @@
 <script setup>
 import { ref, watch, onUnmounted } from 'vue'
 import { getServiceReplicas } from '@/api/service'
+import { enrichWithMockMetrics } from '@/api/monitor'
 import LogViewerDialog from './LogViewerDialog.vue'
+import SparkLine from './monitor/SparkLine.vue'
 
 const props = defineProps({
   visible: {
@@ -19,13 +21,28 @@ const emit = defineEmits(['update:visible'])
 // 副本列表数据
 const replicas = ref([])
 
+// 副本级 sparkline 时间窗（每个副本独立）：{ [replicaId]: '5m' | '30m' | '2h' }
+const rangeMap = ref({})
+const RANGE_OPTIONS = [
+  { value: '5m',  label: '5m' },
+  { value: '30m', label: '30m' },
+  { value: '2h',  label: '2h' }
+]
+const getRange = (replica) => rangeMap.value[replica.id] || '5m'
+const setRange = (replica, range) => {
+  if (!replica?.id || rangeMap.value[replica.id] === range) return
+  rangeMap.value = { ...rangeMap.value, [replica.id]: range }
+  // 切换后立即拉一次，避免等到下一个定时周期
+  loadReplicas()
+}
+
 // 日志查看对话框
 const showLogViewer = ref(false)
 const selectedReplica = ref(null)
 
 // 定时刷新相关
 let refreshTimer = null
-const REFRESH_INTERVAL = 1000 // 1秒刷新一次
+const REFRESH_INTERVAL = 10000 // 10秒刷新一次
 
 // 监听对话框显示状态
 watch(() => props.visible, (val) => {
@@ -46,10 +63,12 @@ const loadReplicas = async () => {
   try {
     const data = await getServiceReplicas(props.service.id)
     // 过滤掉已停止的副本，只显示活跃的副本
-    replicas.value = (data || []).filter(r => {
+    const active = (data || []).filter(r => {
       const status = r.status?.toLowerCase()
       return status !== 'shutdown' && status !== 'complete' && status !== 'remove'
     })
+    // 后端指标接入后，enrichWithMockMetrics 已切换为异步拉取真实 summary（按 rangeMap 逐个选时间窗）
+    replicas.value = await enrichWithMockMetrics(active, rangeMap.value)
   } catch (error) {
     console.error('加载副本列表失败:', error)
     // 如果API调用失败，使用模拟数据作为降级方案
@@ -60,13 +79,14 @@ const loadReplicas = async () => {
 // 模拟数据（降级方案）
 const loadMockReplicas = () => {
   const instances = props.service.instances || 3
-  replicas.value = Array.from({ length: instances }, (_, i) => ({
+  const mocks = Array.from({ length: instances }, (_, i) => ({
     id: `${props.service.name}.${i + 1}`,
     name: `${props.service.name}.${i + 1}`,
     status: i === 0 ? 'running' : (i === instances - 1 ? 'starting' : 'running'),
     node: `node-${(i % 3) + 1}`,
     uptime: i === instances - 1 ? '刚刚' : `${Math.floor(Math.random() * 24) + 1}小时`
   }))
+  Promise.resolve(enrichWithMockMetrics(mocks, rangeMap.value)).then(list => { replicas.value = list })
 }
 
 // 启动定时刷新
@@ -141,6 +161,24 @@ const handleViewLogs = (replica) => {
 
 const handleEnterContainer = (replica) => {
   console.log('进入容器功能暂未开放:', replica)
+}
+
+// 字节格式化：<1024 => B，后面 KB/MB/GB，保留1 位小数
+const formatBytes = (bytes) => {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return '-'
+  const units = ['B', 'K', 'M', 'G', 'T']
+  let idx = 0
+  let v = n
+  while (v >= 1024 && idx < units.length - 1) { v /= 1024; idx++ }
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)}${units[idx]}`
+}
+
+const memHint = (replica) => {
+  if (replica.memoryUsage == null) return ''
+  const used = formatBytes(replica.memoryUsage)
+  const limit = replica.memoryLimit != null ? formatBytes(replica.memoryLimit) : null
+  return limit && limit !== '-' ? `${used} / ${limit}` : used
 }
 
 onUnmounted(() => {
@@ -220,6 +258,18 @@ onUnmounted(() => {
                     {{ replica.name }}
                   </div>
                   <div class="replica-header-right">
+                    <div class="range-chips" role="group" aria-label="时间窗切换">
+                      <button
+                        v-for="opt in RANGE_OPTIONS"
+                        :key="opt.value"
+                        class="range-chip"
+                        :class="{ active: getRange(replica) === opt.value }"
+                        :title="'小图时间窗：' + opt.label"
+                        @click="setRange(replica, opt.value)"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    </div>
                     <div class="replica-actions-inline">
                       <button 
                         class="btn-icon" 
@@ -269,6 +319,50 @@ onUnmounted(() => {
                   <div class="detail-item">
                     <span class="detail-label">重启次数</span>
                     <span class="detail-value">{{ replica.restartCount || 0 }}</span>
+                  </div>
+                </div>
+
+                <!-- 副本实时指标（CPU / 内存 分开两块，左侧 label+value 上下布局，右侧图表） -->
+                <div class="replica-metrics">
+                  <div class="metrics-section">
+                    <div class="metric-row">
+                      <div class="metric-text">
+                        <span class="metric-label">CPU</span>
+                        <span class="metric-value cpu">{{ replica.cpuPercent != null ? replica.cpuPercent.toFixed(1) + '%' : '-' }}</span>
+                      </div>
+                      <SparkLine
+                        :points="replica.cpuSpark || []"
+                        :timestamps="replica.timestamps || []"
+                        :width="140"
+                        :height="52"
+                        color="#667eea"
+                        :fill="true"
+                        :interactive="true"
+                        label="CPU"
+                        unit="%"
+                      />
+                    </div>
+                  </div>
+                  <div class="metrics-section">
+                    <div class="metric-row">
+                      <div class="metric-text">
+                        <span class="metric-label">MEM</span>
+                        <span class="metric-value mem">{{ replica.memPercent != null ? replica.memPercent.toFixed(1) + '%' : '-' }}</span>
+                        <span v-if="replica.memoryUsage != null" class="metric-hint">{{ memHint(replica) }}</span>
+                      </div>
+                      <SparkLine
+                        :points="replica.memSpark || []"
+                        :timestamps="replica.timestamps || []"
+                        :width="140"
+                        :height="52"
+                        color="#f5a623"
+                        :fill="true"
+                        :interactive="true"
+                        label="内存"
+                        unit="%"
+                        :hint-text="memHint(replica)"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -499,6 +593,43 @@ onUnmounted(() => {
   gap: 0.75rem;
 }
 
+/* 时间窗切换 chip 组（位于日志/终端图标左侧） */
+.range-chips {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.range-chip {
+  padding: 2px 8px;
+  min-width: 30px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 500;
+  font-family: 'Courier New', monospace;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  line-height: 1;
+}
+
+.range-chip:hover:not(.active) {
+  background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+  color: var(--primary-color);
+}
+
+.range-chip.active {
+  background: var(--primary-color);
+  color: white;
+  box-shadow: 0 1px 3px rgba(102, 126, 234, 0.3);
+}
+
 .replica-actions-inline {
   display: flex;
   gap: 0.5rem;
@@ -579,6 +710,86 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 0.75rem;
+  row-gap: 0.9rem;
+  margin-bottom: 0.85rem;
+}
+
+/* 副本实时指标：CPU / MEM 并排两块，内部样式与主页服务卡一致 */
+.replica-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.metrics-section {
+  padding: 0.65rem 0.9rem;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.metric-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.metric-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 68px;
+  flex-shrink: 0;
+}
+
+.metric-label {
+  font-weight: 700;
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+
+.metric-value {
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  font-size: 0.95rem;
+  line-height: 1.1;
+}
+
+.metric-value.cpu {
+  color: var(--primary-color);
+}
+
+.metric-value.mem {
+  color: #f5a623;
+}
+
+/* 内存具体占用提示（如 256M / 1G），放在百分比下方 */
+.metric-hint {
+  font-family: 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  line-height: 1.1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* SparkLine 在副本卡下高 52px，与 hover tooltip 交互适配 */
+.metric-row :deep(.sparkline) {
+  flex: 1;
+  min-width: 0;
+  height: 52px;
+}
+
+/* 交互模式 wrapper 拉伸占满 metric-row 剩余宽度，svg 自动跟随（避免右侧留白） */
+.metric-row :deep(.sparkline-wrap) {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto !important;
+  height: 52px !important;
 }
 
 .detail-item {

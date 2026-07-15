@@ -15,7 +15,7 @@ const props = defineProps({
 const emit = defineEmits(['update:visible', 'confirm'])
 
 const formData = ref({
-  swarmManagerHosts: '',
+  sshHosts: [{ host: '', port: 22, username: 'root', password: '', privateKey: '' }],
   registryUrl: '',
   networkMode: 'overlay'
 })
@@ -26,9 +26,19 @@ const isDockerSwarm = computed(() => {
 
 const resetForm = () => {
   formData.value = {
-    swarmManagerHosts: '',
+    sshHosts: [{ host: '', port: 22, username: 'root', password: '', privateKey: '' }],
     registryUrl: '',
     networkMode: 'overlay'
+  }
+}
+
+const addSshHost = () => {
+  formData.value.sshHosts.push({ host: '', port: 22, username: 'root', password: '', privateKey: '' })
+}
+
+const removeSshHost = (index) => {
+  if (formData.value.sshHosts.length > 1) {
+    formData.value.sshHosts.splice(index, 1)
   }
 }
 
@@ -40,10 +50,40 @@ const loadConfig = () => {
   
   try {
     const config = JSON.parse(props.environment.config)
+    let sshHosts = []
+    
+    if (Array.isArray(config.swarmManagerHosts) && config.swarmManagerHosts.length > 0) {
+      const first = config.swarmManagerHosts[0]
+      if (typeof first === 'object') {
+        // 新格式：SSH 对象数组
+        sshHosts = config.swarmManagerHosts.map(h => ({
+          host: h.host || '',
+          port: h.port || 22,
+          username: h.username || 'root',
+          password: h.password || '',
+          privateKey: h.privateKey || h.privateKeyPath || ''
+        }))
+      } else {
+        // 旧格式：tcp://host:port 字符串数组，转换为 SSH
+        sshHosts = config.swarmManagerHosts.map(s => {
+          const host = s.replace('tcp://', '').replace('ssh://', '').replace(/:\d+$/, '')
+          return {
+            host,
+            port: 22,
+            username: 'root',
+            password: config.sshPassword || '',
+            privateKey: config.sshPrivateKey || ''
+          }
+        })
+      }
+    }
+    
+    if (sshHosts.length === 0) {
+      sshHosts = [{ host: '', port: 22, username: 'root', password: '', privateKey: '' }]
+    }
+    
     formData.value = {
-      swarmManagerHosts: Array.isArray(config.swarmManagerHosts) 
-        ? config.swarmManagerHosts.join('\n') 
-        : (config.swarmManagerHosts || ''),
+      sshHosts,
       registryUrl: config.registryUrl || '',
       networkMode: config.networkMode || 'overlay'
     }
@@ -67,9 +107,16 @@ const handleClose = () => {
 }
 
 const validateForm = () => {
-  if (!formData.value.swarmManagerHosts.trim()) {
-    alert('请输入Swarm Manager地址')
+  const validHosts = formData.value.sshHosts.filter(h => h.host.trim())
+  if (validHosts.length === 0) {
+    alert('请至少配置一个 SSH 主机地址')
     return false
+  }
+  for (const h of validHosts) {
+    if (!h.password && !h.privateKey) {
+      alert(`主机 ${h.host} 需要配置密码或私钥`)
+      return false
+    }
   }
   if (!formData.value.registryUrl.trim()) {
     alert('请输入默认镜像仓库地址')
@@ -83,14 +130,19 @@ const handleConfirm = () => {
     return
   }
   
-  // 将多行地址转为数组
-  const hosts = formData.value.swarmManagerHosts
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => line.length > 0)
+  // 过滤有效 SSH 主机
+  const validHosts = formData.value.sshHosts
+    .filter(h => h.host.trim())
+    .map(h => ({
+      host: h.host.trim(),
+      port: h.port || 22,
+      username: h.username.trim() || 'root',
+      password: h.password || '',
+      privateKey: h.privateKey || ''
+    }))
   
   const submitData = {
-    swarmManagerHosts: hosts,
+    swarmManagerHosts: validHosts,
     registryUrl: formData.value.registryUrl.trim(),
     networkMode: formData.value.networkMode
   }
@@ -132,16 +184,49 @@ onUnmounted(() => {
       
           <div class="dialog-body">
             <div v-if="isDockerSwarm" class="config-section">
-              <!-- Swarm Manager 地址 -->
+              <!-- SSH 主机配置 -->
               <div class="form-group">
-                <label>Swarm Manager 地址 <span class="required">*</span></label>
-                <textarea 
-                  v-model="formData.swarmManagerHosts"
-                  placeholder="tcp://10.10.0.22:2375&#10;tcp://10.10.0.23:2375&#10;tcp://10.10.0.24:2375"
-                  class="form-textarea"
-                  rows="4"
-                />
-                <div class="form-hint">每行一个Manager节点地址，格式：tcp://IP:端口</div>
+                <div class="label-with-button">
+                  <label>Swarm Manager SSH 连接 <span class="required">*</span></label>
+                  <button type="button" class="btn-add-host" @click="addSshHost">+ 添加节点</button>
+                </div>
+                <div class="ssh-hosts-list">
+                  <div v-for="(host, index) in formData.sshHosts" :key="index" class="ssh-host-item">
+                    <div class="ssh-host-header">
+                      <span class="ssh-host-index">节点 {{ index + 1 }}</span>
+                      <button v-if="formData.sshHosts.length > 1" type="button" class="btn-remove-host" @click="removeSshHost(index)">移除</button>
+                    </div>
+                    <div class="ssh-host-fields">
+                      <div class="field-row">
+                        <div class="field-item flex-2">
+                          <label class="field-label">主机地址</label>
+                          <input v-model="host.host" type="text" placeholder="10.10.0.22" class="form-input" />
+                        </div>
+                        <div class="field-item flex-1">
+                          <label class="field-label">端口</label>
+                          <input v-model.number="host.port" type="number" placeholder="22" class="form-input" />
+                        </div>
+                        <div class="field-item flex-1">
+                          <label class="field-label">用户名</label>
+                          <input v-model="host.username" type="text" placeholder="root" class="form-input" />
+                        </div>
+                      </div>
+                      <div class="field-row">
+                        <div class="field-item flex-1">
+                          <label class="field-label">密码</label>
+                          <input v-model="host.password" type="password" placeholder="SSH 密码" class="form-input" />
+                        </div>
+                      </div>
+                      <div class="field-row">
+                        <div class="field-item flex-1">
+                          <label class="field-label">私钥内容 <span class="optional">(与密码二选一)</span></label>
+                          <textarea v-model="host.privateKey" placeholder="-----BEGIN RSA PRIVATE KEY-----&#10;...&#10;-----END RSA PRIVATE KEY-----" class="form-textarea private-key-textarea" rows="3" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="form-hint">配置 Swarm Manager 节点 SSH 连接信息，支持多节点故障转移。密码与私钥填一个即可</div>
               </div>
               
               <!-- 镜像仓库地址 -->
@@ -300,6 +385,116 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
+}
+
+.label-with-button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.label-with-button label {
+  margin-bottom: 0;
+}
+
+.btn-add-host {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--primary-color);
+  background: white;
+  color: var(--primary-color);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-add-host:hover {
+  background: var(--primary-light);
+  transform: translateY(-1px);
+}
+
+.ssh-hosts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ssh-host-item {
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: var(--bg-primary);
+  transition: border-color 0.2s;
+}
+
+.ssh-host-item:hover {
+  border-color: var(--primary-color);
+}
+
+.ssh-host-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+
+.ssh-host-index {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.btn-remove-host {
+  padding: 0.2rem 0.5rem;
+  border: none;
+  background: transparent;
+  color: var(--danger-color);
+  font-size: 0.75rem;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.btn-remove-host:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.ssh-host-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.field-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.field-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.field-item.flex-1 {
+  flex: 1;
+}
+
+.field-item.flex-2 {
+  flex: 2;
+}
+
+.field-label {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.field-item .form-input {
+  padding: 0.5rem 0.65rem;
+  font-size: 0.85rem;
 }
 
 .form-group {

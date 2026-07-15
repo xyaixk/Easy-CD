@@ -40,3 +40,6 @@ build/
 
 ### Log ###
 /logs/
+
+### Qoder MCP ###
+.mcp.json

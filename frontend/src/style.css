@@ -10,11 +10,12 @@
   --primary-hover: #764ba2;
   --primary-light: #e0e7ff;
   --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --header-shadow: 0 4px 20px rgba(102, 126, 234, 0.15);
+  --primary-shadow: rgba(102, 126, 234, 0.25);
   --success-color: #10b981;
   --warning-color: #f59e0b;
   --danger-color: #ef4444;
-  --info-color: #06b6d4;
-  
+  --info-color: #06b6d4;  
   /* 背景色 */
   --bg-primary: #f8fafc;
   --bg-secondary: #ffffff;
@@ -76,4 +77,14 @@ a {
 
 a:hover {
   color: var(--primary-hover);
+}
+
+/* 需要登录的环境→使用环境自身 color 作为全局主题色 */
+/* --primary-color 由 JS 根据当前环境注入，其他派生色自动计算 */
+:root.theme-locked {
+  --primary-hover: color-mix(in srgb, var(--primary-color) 82%, black);
+  --primary-light: color-mix(in srgb, var(--primary-color) 15%, white);
+  --primary-gradient: linear-gradient(135deg, var(--primary-color) 0%, color-mix(in srgb, var(--primary-color) 75%, black) 100%);
+  --header-shadow: 0 4px 20px color-mix(in srgb, var(--primary-color) 25%, transparent);
+  --primary-shadow: color-mix(in srgb, var(--primary-color) 30%, transparent);
 }

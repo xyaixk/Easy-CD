@@ -8,6 +8,8 @@ import ReplicasDialog from './components/ReplicasDialog.vue'
 import ConfigDialog from './components/ConfigDialog.vue'
 import LoginDialog from './components/LoginDialog.vue'
 import LogSearchDialog from './components/LogSearchDialog.vue'
+import HostMetricStrip from './components/monitor/HostMetricStrip.vue'
+import HostDetailDialog from './components/monitor/HostDetailDialog.vue'
 import toast from '@/utils/toast'
 import { listEnvironments, addEnvironment as addEnvApi, deleteEnvironment as deleteEnvApi, updateEnvironment as updateEnvApi } from '@/api/environment'
 import { login as loginApi, logout as logoutApi, getCurrentUser as getCurrentUserApi } from '@/api/auth'
@@ -22,6 +24,7 @@ import {
   scaleService
 } from '@/api/service'
 import { clearAuth, getCurrentUser as getStoredUser, getToken, setAuth } from '@/utils/auth'
+import { enrichServiceMetrics } from '@/api/monitor'
 
 // 环境列表
 const environments = ref([])
@@ -67,6 +70,15 @@ const showLogSearchDialog = ref(false)
 
 const handleOpenLogs = () => {
   showLogSearchDialog.value = true
+}
+
+// 宿主机详情弹窗
+const showHostDetail = ref(false)
+const selectedHost = ref(null)
+
+const handleHostClick = (host) => {
+  selectedHost.value = host
+  showHostDetail.value = true
 }
 
 // 打开配置
@@ -139,7 +151,7 @@ const services = ref([])
 
 // 定时刷新相关
 let refreshTimer = null
-const REFRESH_INTERVAL = 5000 // 5秒
+const REFRESH_INTERVAL = 10000 // 10秒
 
 // 过滤后的服务列表
 const filteredServices = computed(() => {
@@ -270,6 +282,9 @@ const loadServices = async () => {
       healthyInstances: service.healthyInstances || 0,
       instances: service.instances || 0,
       desiredInstances: service.desiredInstances || 0,
+      // 服务模式和副本数
+      serviceMode: service.serviceMode || 'replicated',
+      replicas: service.replicas || service.desiredInstances || 1,
       // Docker配置信息（编辑时需要）
       dockerImage: service.dockerImage || '',
       dockerParams: service.dockerParams || '',
@@ -283,9 +298,12 @@ const loadServices = async () => {
       diskReadRate: service.diskReadRate || 0,
       diskWriteRate: service.diskWriteRate || 0
     }))
-    
+
+    // 并发补齐 sparkline（失败静默），不阻塞接下来的 diff 更新
+    const enriched = await enrichServiceMetrics(newServices)
+
     // 只更新有变化的服务
-    updateChangedServices(newServices)
+    updateChangedServices(enriched)
   } catch (error) {
     console.error('加载服务列表失败:', error)
     // 静默失败，避免定时刷新时频繁提示错误
@@ -343,7 +361,10 @@ const hasServiceChanged = (oldService, newService) => {
     oldService.networkRxRate !== newService.networkRxRate ||
     oldService.networkTxRate !== newService.networkTxRate ||
     oldService.diskReadRate !== newService.diskReadRate ||
-    oldService.diskWriteRate !== newService.diskWriteRate
+    oldService.diskWriteRate !== newService.diskWriteRate ||
+    // sparkline 引用变化（enrichServiceMetrics 每轮返回新数组），确保图能刷
+    oldService.cpuSpark !== newService.cpuSpark ||
+    oldService.memSpark !== newService.memSpark
 }
 
 // 启动定时刷新
@@ -374,6 +395,18 @@ watch(selectedEnv, (newEnvId) => {
     localStorage.setItem('selectedEnvId', newEnvId)
   }
 })
+
+// 当前环境→使用环境自身 color 作为全局主题色
+watch(currentEnvironmentInfo, (env) => {
+  const html = document.documentElement
+  if (env && env.color) {
+    html.style.setProperty('--primary-color', env.color)
+    html.classList.add('theme-locked')
+  } else {
+    html.style.removeProperty('--primary-color')
+    html.classList.remove('theme-locked')
+  }
+}, { immediate: true })
 
 // 页面加载时获取环境列表和服务列表
 onMounted(async () => {
@@ -553,6 +586,12 @@ const handleConfirmService = async (serviceData) => {
 
     <!-- 主内容区 -->
     <main class="main-content">
+      <!-- 宿主机监控条 -->
+      <HostMetricStrip
+        :environment-id="selectedEnv"
+        @host-click="handleHostClick"
+      />
+
       <!-- 搜索和操作栏 -->
       <div class="toolbar">
         <div class="search-box">
@@ -682,6 +721,13 @@ const handleConfirmService = async (serviceData) => {
       :visible="showLogSearchDialog"
       :current-environment="currentEnvironmentInfo"
       @update:visible="showLogSearchDialog = $event"
+    />
+
+    <!-- 宿主机详情弹窗 -->
+    <HostDetailDialog
+      :visible="showHostDetail"
+      :host="selectedHost"
+      @update:visible="showHostDetail = $event"
     />
   </div>
 </template>

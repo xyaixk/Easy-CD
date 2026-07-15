@@ -3,7 +3,6 @@ package com.easy.cd.deploy;
 import com.easy.cd.deploy.model.DeployRequest;
 import com.easy.cd.deploy.model.DeployResult;
 import com.easy.cd.dto.ImageVersionDTO;
-import com.easy.cd.dto.ServiceMetricsInfo;
 import com.easy.cd.dto.ServiceStatusInfo;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
@@ -96,14 +95,6 @@ public interface DeployStrategy {
      * @return 服务状态信息列表
      */
     List<ServiceStatusInfo> collectServiceStatus(Environment environment, List<AppService> services);
-    
-    /**
-     * 收集服务监控指标
-     * @param environment 环境信息
-     * @param services 服务列表
-     * @return 服务监控指标列表
-     */
-    List<ServiceMetricsInfo> collectServiceMetrics(Environment environment, List<AppService> services);
     
     /**
      * 流式推送服务聚合日志（SSE）

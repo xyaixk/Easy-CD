@@ -43,7 +43,6 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     
     private final ServiceMapper serviceMapper;
     private final ServiceStatusMapper serviceStatusMapper;
-    private final ServiceMetricsMapper serviceMetricsMapper;
     private final ReplicaStatusMapper replicaStatusMapper;
     private final ReplicaMetricsMapper replicaMetricsMapper;
     private final EnvironmentMapper environmentMapper;
@@ -234,27 +233,20 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         );
         log.info("已删除服务[{}]的副本状态记录: {} 条", id, deletedReplicaStatus);
         
-        // 4.3 删除服务指标（历史监控数据）
-        int deletedServiceMetrics = serviceMetricsMapper.delete(
-            new LambdaQueryWrapper<ServiceMetrics>()
-                .eq(ServiceMetrics::getServiceId, id)
-        );
-        log.info("已删除服务[{}]的服务指标记录: {} 条", id, deletedServiceMetrics);
-        
-        // 4.4 删除服务状态
+        // 4.3 删除服务状态
         int deletedServiceStatus = serviceStatusMapper.delete(
             new LambdaQueryWrapper<ServiceStatus>()
                 .eq(ServiceStatus::getServiceId, id)
         );
         log.info("已删除服务[{}]的服务状态记录: {} 条", id, deletedServiceStatus);
         
-        // 4.5 删除服务基本信息（最后删父表）
+        // 4.4 删除服务基本信息（最后删父表）
         int deletedService = serviceMapper.deleteById(id);
         log.info("已删除服务[{}]的基本信息: {} 条", id, deletedService);
         
         log.info("服务删除成功: {}, ID: {}, 共删除 {} 条记录", 
             service.getName(), id, 
-            deletedReplicaMetrics + deletedReplicaStatus + deletedServiceMetrics + deletedServiceStatus + deletedService);
+            deletedReplicaMetrics + deletedReplicaStatus + deletedServiceStatus + deletedService);
     }
     
     /**
@@ -381,11 +373,10 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
                 .notIn(ReplicaStatus::getStatus, "shutdown", "complete", "remove")
         );
         
-        // 使用 Stream 按 slot 分组，每组取更新时间最新的一条，然后转换为 DTO
+        // 使用 Stream 按 slot 或 taskId 分组，每组取更新时间最新的一条，然后转换为 DTO
         List<ReplicaDetailDTO> result = replicaStatusList.stream()
-            .filter(replica -> replica.getTaskSlot() != null)
             .collect(Collectors.toMap(
-                ReplicaStatus::getTaskSlot,
+                replica -> replica.getTaskSlot() != null ? "slot:" + replica.getTaskSlot() : "task:" + replica.getTaskId(),
                 Function.identity(),
                 BinaryOperator.maxBy(Comparator.comparing(
                     ReplicaStatus::getUpdatedTime,
@@ -415,11 +406,9 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             .errorMessage(status.getErrorMessage())
             .build();
         
-        // 运行时间 - 使用数据库的 createdTime 而不是 Docker 的 timestamp
-        if (status.getStatus() != null && status.getStatus().equals("running") && status.getCreatedTime() != null) {
-            LocalDateTime now = LocalDateTime.now();
-            long seconds = java.time.Duration.between(status.getCreatedTime(), now).getSeconds();
-            dto.setUptime(formatUptime(seconds));
+        // 运行时间 - 使用 uptimeSeconds 字段
+        if (status.getStatus() != null && status.getStatus().equals("running") && status.getUptimeSeconds() != null) {
+            dto.setUptime(formatUptime(status.getUptimeSeconds()));
         }
         
         return dto;
@@ -809,24 +798,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
             }
         }
         
-        // 监控指标（获取最新的一条记录）
-        ServiceMetrics metrics = serviceMetricsMapper.selectOne(
-            new LambdaQueryWrapper<ServiceMetrics>()
-                .eq(ServiceMetrics::getServiceId, service.getId())
-                .orderByDesc(ServiceMetrics::getCollectedTime)
-                .last("LIMIT 1")
-        );
-        
-        if (metrics != null) {
-            vo.setCpuPercent(metrics.getCpuPercent());
-            vo.setMemoryUsage(metrics.getMemoryUsage());
-            vo.setMemoryLimit(metrics.getMemoryLimit());
-            vo.setMemoryPercent(metrics.getMemoryPercent());
-            vo.setNetworkRxRate(metrics.getNetworkRxRate());
-            vo.setNetworkTxRate(metrics.getNetworkTxRate());
-            vo.setDiskReadRate(metrics.getDiskReadRate());
-            vo.setDiskWriteRate(metrics.getDiskWriteRate());
-        }
+        // 监控指标：P2 后已取消以 service 为维度的采集，
+        // 后续将基于 replica_metrics 聚合补齐 VO 中的 cpuPercent/memoryUsage 等字段。
         
         return vo;
     }

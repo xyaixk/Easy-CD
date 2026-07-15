@@ -60,6 +60,11 @@ public class AppService {
      */
     private String externalServiceName;
     
+    /**
+     * 平台操作更新时间（用于双向同步防抖）
+     */
+    private LocalDateTime lastPlatformUpdateTime;
+
     private LocalDateTime createdTime;
     
     private LocalDateTime updatedTime;

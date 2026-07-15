@@ -6,12 +6,18 @@ server:
 spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://public.bc.office.ysb:3306/cd_database?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://10.10.0.62:3306/cd_database_v2?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
     username: root
     password: AAbb11@@
   jackson:
     time-zone: Asia/Shanghai
     date-format: yyyy-MM-dd HH:mm:ss
+  # 调度线程池（默认只 1 个，多 @Scheduled 任务会串行阻塞）
+  task:
+    scheduling:
+      pool:
+        size: 8
+      thread-name-prefix: scheduler-
 
 mybatis-plus:
   mapper-locations: classpath:mapper/**/*.xml
@@ -25,3 +31,30 @@ loki:
   namespace: ysb
   # 单次查询上限（取“全部”时也不超过此值）
   max-result-window: 5000
+
+# 监控采集配置
+monitor:
+  # 总开关：false 时所有采集/同步 Task 不启动
+  enabled: true
+  # 采集器参数
+  collector:
+    # 高频 SSH 状态和指标采集周期
+    interval-ms: 10000
+    parallelism: 16
+    node-timeout-ms: 5000
+  # 调试过滤：为空时采集所有环境；配置后只采指定环境
+  debug:
+    env-filter:
+  # 分层降采样保留策略（采集周期 10s）：0-24h 10s -> 1-3d 1min -> 3-7d 5min -> 7-30d 15min -> 30-365d 1h -> >1y 删除
+  retention:
+    enabled: true
+    tier1-hours: 24
+    tier1-step-seconds: 60
+    tier2-hours: 72
+    tier2-step-seconds: 300
+    tier3-hours: 168
+    tier3-step-seconds: 900
+    tier4-hours: 720
+    tier4-step-seconds: 3600
+    max-hours: 8760
+    window-hours: 1

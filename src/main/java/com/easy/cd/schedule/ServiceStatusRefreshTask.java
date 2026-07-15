@@ -11,6 +11,7 @@ import com.easy.cd.mapper.ServiceMapper;
 import com.easy.cd.mapper.ServiceStatusMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -19,10 +20,11 @@ import java.util.List;
 
 /**
  * 服务状态定时刷新任务
- * 每3秒刷新一次所有服务的运行状态
+ * 默认每 10 秒刷新一次所有服务的运行状态
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(prefix = "monitor", name = "enabled", havingValue = "true", matchIfMissing = true)
 @RequiredArgsConstructor
 public class ServiceStatusRefreshTask {
 
@@ -31,7 +33,7 @@ public class ServiceStatusRefreshTask {
     private final EnvironmentMapper environmentMapper;
     private final DeployService deployService;
 
-    @Scheduled(fixedRate = 3000)
+    @Scheduled(fixedRateString = "${monitor.collector.interval-ms:10000}", initialDelay = 3000)
     public void refreshAllServiceStatus() {
         try {
             List<Environment> environments = environmentMapper.selectList(null);

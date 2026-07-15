@@ -1,0 +1,55 @@
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker_logs" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_swarm_service_name"]
+    target_label  = "service_name"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container_name"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_image"]
+    target_label  = "image_name"
+  }
+}
+
+loki.process "docker" {
+  stage.drop {
+    older_than          = "24h"
+    drop_counter_reason = "too_old"
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.docker_logs.rules
+  labels        = {
+    platform  = "docker",
+    app_env   = sys.env("APP_ENV"),
+    namespace = sys.env("SERVICE_NAMESPACE"),
+  }
+  forward_to    = [loki.process.docker.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = sys.env("LOKI_PUSH_URL")
+  }
+}
