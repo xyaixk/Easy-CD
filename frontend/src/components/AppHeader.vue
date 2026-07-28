@@ -14,13 +14,28 @@ const props = defineProps({
   currentUser: {
     type: Object,
     default: null
+  },
+  activeTaskCount: {
+    type: Number,
+    default: 0
   }
 })
 
-const emit = defineEmits(['update:selectedEnv', 'addEnvironment', 'deleteEnvironment', 'openConfig', 'openLogin', 'logout', 'openLogs'])
+const emit = defineEmits(['update:selectedEnv', 'addEnvironment', 'deleteEnvironment', 'openConfig', 'openLogin', 'logout', 'openLogs', 'openTasks'])
 
 const currentEnvironment = computed(() => {
   return props.environments.find(e => e.id === props.selectedEnv)
+})
+
+const hasLokiConfig = computed(() => {
+  const rawConfig = currentEnvironment.value?.config
+  if (!rawConfig) return false
+  try {
+    const config = typeof rawConfig === 'string' ? JSON.parse(rawConfig) : rawConfig
+    return typeof config?.lokiUri === 'string' && config.lokiUri.trim().length > 0
+  } catch (error) {
+    return false
+  }
 })
 </script>
 
@@ -52,14 +67,15 @@ const currentEnvironment = computed(() => {
           @delete-environment="emit('deleteEnvironment', $event)"
         />
         
-        <button class="header-btn" title="部署历史">
+        <button class="header-btn task-btn" title="部署任务" @click="emit('openTasks')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/>
             <polyline points="12 6 12 12 16 14"/>
           </svg>
+          <span v-if="activeTaskCount > 0" class="task-badge">{{ activeTaskCount }}</span>
         </button>
         
-        <button class="header-btn" title="日志" @click="emit('openLogs')">
+        <button v-if="hasLokiConfig" class="header-btn" title="日志" @click="emit('openLogs')">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
@@ -200,6 +216,28 @@ const currentEnvironment = computed(() => {
 
 .user-btn {
   background: rgba(255, 255, 255, 0.2);
+}
+
+.task-btn {
+  position: relative;
+}
+
+.task-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--warning-color, #f59e0b);
+  color: white;
+  font-size: 0.68rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
 }
 
 .header-user {

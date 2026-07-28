@@ -1,4 +1,5 @@
 import request from '@/utils/request'
+import { getToken } from '@/utils/auth'
 
 /**
  * 查询环境下的所有服务
@@ -116,14 +117,21 @@ export function getAvailableVersions(id) {
 }
 
 /**
- * 获取服务日志流地址
+ * 获取服务日志流地址（WebSocket，复用终端通道的 logs 模式）
  * @param {Number} serviceId 服务ID
  * @param {Number} tail 获取最后N行
  * @param {Boolean} follow 是否持续推送
- * @returns {String} SSE URL
+ * @returns {String} WebSocket URL
  */
-export function getServiceLogsUrl(serviceId, tail = 500, follow = false, replicaId = null) {
-  const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
-  const replicaParam = replicaId ? `&replicaId=${encodeURIComponent(replicaId)}` : ''
-  return `${baseURL}/service/${serviceId}/logs?tail=${tail}&follow=${follow}${replicaParam}`
+export function getServiceLogsWsUrl(serviceId, tail = 500, follow = false) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const params = new URLSearchParams({
+    mode: 'logs',
+    serviceId: String(serviceId),
+    tail: String(tail),
+    follow: String(follow)
+  })
+  const token = getToken()
+  if (token) params.set('token', token)
+  return `${proto}//${location.host}/api/terminal?${params.toString()}`
 }

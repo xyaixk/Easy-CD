@@ -166,16 +166,16 @@ const handleClickOutside = (e) => {
 }
 
 .dialog-header {
-  padding: 1.75rem 2rem 1.25rem;
+  padding: 1.25rem 2rem 1rem;
   border-bottom: 1px solid var(--border-color);
   text-align: center;
 }
 
 .header-icon {
-  width: 56px;
-  height: 56px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  margin: 0 auto 1rem;
+  margin: 0 auto 0.75rem;
   display: flex;
   align-items: center;
   justify-content: center;

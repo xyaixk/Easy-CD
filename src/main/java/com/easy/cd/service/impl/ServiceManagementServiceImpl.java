@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.easy.cd.deploy.DeployService;
 import com.easy.cd.deploy.model.DeployRequest;
 import com.easy.cd.deploy.model.DeployResult;
+import com.easy.cd.deploy.queue.DeployTaskQueueService;
 import com.easy.cd.dto.ImageVersionDTO;
 import com.easy.cd.dto.ReplicaDetailDTO;
 import com.easy.cd.dto.ServiceCreateDTO;
@@ -17,8 +18,9 @@ import com.easy.cd.service.ServiceManagementService;
 import com.easy.cd.vo.ServiceDetailVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -47,9 +49,30 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     private final ReplicaMetricsMapper replicaMetricsMapper;
     private final EnvironmentMapper environmentMapper;
     private final DeployService deployService;
+    private final DeployTaskQueueService deployTaskQueueService;
+
+    /** 自身代理：队列 worker 线程内调用 doXxx 时保证 @Transactional 生效 */
+    @Autowired
+    @Lazy
+    private ServiceManagementServiceImpl self;
     
     /**
-     * 创建服务
+     * 创建服务（异步）：同步做轻量校验后提交到环境队列，立即返回任务ID
+     */
+    @Override
+    public Long create(ServiceCreateDTO createDTO) {
+        log.info("提交创建服务任务: {}, 环境ID: {}", createDTO.getName(), createDTO.getEnvironmentId());
+        
+        // 同步校验：字段/环境/重名问题立即反馈给前端，耗时部署在后台执行
+        validateAndGetEnvironment(createDTO);
+        checkServiceNameUnique(createDTO.getEnvironmentId(), createDTO.getName());
+        
+        return deployTaskQueueService.submit(createDTO.getEnvironmentId(), null, createDTO.getName(),
+                "CREATE", () -> self.doCreate(createDTO));
+    }
+    
+    /**
+     * 创建服务（队列 worker 线程内执行）
      * 核心流程：
      * 1. 参数校验（必填字段、副本数等）
      * 2. 先保存服务信息到数据库（利用唯一索引校验重复）
@@ -58,9 +81,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
      * 5. 部署失败则事务回滚，删除数据库记录
      * 6. 返回创建的服务信息
      */
-    @Override
     @Transactional(rollbackFor = Exception.class)
-    public ServiceDetailVO create(ServiceCreateDTO createDTO) {
+    public ServiceDetailVO doCreate(ServiceCreateDTO createDTO) {
         log.info("创建服务: {}, 环境ID: {}", createDTO.getName(), createDTO.getEnvironmentId());
         
         // 步骤1: 参数校验
@@ -89,7 +111,25 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
-     * 更新服务
+     * 更新服务（异步）：同步校验后提交到环境队列，立即返回任务ID
+     */
+    @Override
+    public Long update(Long id, ServiceUpdateDTO updateDTO) {
+        log.info("提交更新服务任务: ID={}", id);
+        
+        AppService service = serviceMapper.selectById(id);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        getEnvironmentOrThrow(service.getEnvironmentId());
+        validateUpdateFields(updateDTO);
+        
+        return deployTaskQueueService.submit(service.getEnvironmentId(), id, service.getName(),
+                "UPDATE", () -> self.doUpdate(id, updateDTO));
+    }
+    
+    /**
+     * 更新服务（队列 worker 线程内执行）
      * 核心流程：
      * 1. 查询原服务信息
      * 2. 参数校验（服务名不可修改）
@@ -98,9 +138,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
      * 5. 更新成功后修改数据库
      * 6. 返回更新后的服务信息
      */
-    @Override
     @Transactional(rollbackFor = Exception.class)
-    public ServiceDetailVO update(Long id, ServiceUpdateDTO updateDTO) {
+    public ServiceDetailVO doUpdate(Long id, ServiceUpdateDTO updateDTO) {
         log.info("更新服务: ID={}, 服务名={}", id, updateDTO.getName());
         
         // 步骤1: 查询原服务
@@ -190,11 +229,27 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
-     * 删除服务（包括 Docker 服务和数据库记录）
+     * 删除服务（异步）：同步校验后提交到环境队列，立即返回任务ID
      */
     @Override
+    public Long delete(Long id) {
+        log.info("提交删除服务任务, id: {}", id);
+        
+        AppService service = serviceMapper.selectById(id);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        getEnvironmentOrThrow(service.getEnvironmentId());
+        
+        return deployTaskQueueService.submit(service.getEnvironmentId(), id, service.getName(),
+                "DELETE", () -> self.doDelete(id));
+    }
+    
+    /**
+     * 删除服务（队列 worker 线程内执行，包括 Docker 服务和数据库记录）
+     */
     @Transactional(rollbackFor = Exception.class)
-    public void delete(Long id) {
+    public void doDelete(Long id) {
         log.info("删除服务, id: {}", id);
         
         // 步骤1: 查询服务信息
@@ -250,10 +305,26 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
-     * 重启服务
+     * 重启服务（异步）：提交到环境队列，立即返回任务ID
      */
     @Override
-    public void restart(Long id) {
+    public Long restart(Long id) {
+        log.info("提交重启服务任务, id: {}", id);
+        
+        AppService service = serviceMapper.selectById(id);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        getEnvironmentOrThrow(service.getEnvironmentId());
+        
+        return deployTaskQueueService.submit(service.getEnvironmentId(), id, service.getName(),
+                "RESTART", () -> self.doRestart(id));
+    }
+    
+    /**
+     * 重启服务（队列 worker 线程内执行）
+     */
+    public void doRestart(Long id) {
         log.info("重启服务, id: {}", id);
         
         AppService service = serviceMapper.selectById(id);
@@ -272,10 +343,26 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
-     * 停止服务
+     * 停止服务（异步）：提交到环境队列，立即返回任务ID
      */
     @Override
-    public void stop(Long id) {
+    public Long stop(Long id) {
+        log.info("提交停止服务任务, id: {}", id);
+        
+        AppService service = serviceMapper.selectById(id);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        getEnvironmentOrThrow(service.getEnvironmentId());
+        
+        return deployTaskQueueService.submit(service.getEnvironmentId(), id, service.getName(),
+                "STOP", () -> self.doStop(id));
+    }
+    
+    /**
+     * 停止服务（队列 worker 线程内执行）
+     */
+    public void doStop(Long id) {
         log.info("停止服务, id: {}", id);
         
         AppService service = serviceMapper.selectById(id);
@@ -294,10 +381,26 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
-     * 回滚服务
+     * 回滚服务（异步）：提交到环境队列，立即返回任务ID
      */
     @Override
-    public void rollback(Long id, String targetVersion) {
+    public Long rollback(Long id, String targetVersion) {
+        log.info("提交回滚服务任务, id: {}, targetVersion: {}", id, targetVersion);
+        
+        AppService service = serviceMapper.selectById(id);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        getEnvironmentOrThrow(service.getEnvironmentId());
+        
+        return deployTaskQueueService.submit(service.getEnvironmentId(), id, service.getName(),
+                "ROLLBACK", () -> self.doRollback(id, targetVersion));
+    }
+    
+    /**
+     * 回滚服务（队列 worker 线程内执行）
+     */
+    public void doRollback(Long id, String targetVersion) {
         log.info("回滚服务, id: {}, targetVersion: {}", id, targetVersion);
         
         AppService service = serviceMapper.selectById(id);
@@ -316,10 +419,38 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     }
     
     /**
-     * 调整副本数
+     * 调整副本数（异步）：同步校验后提交到环境队列，立即返回任务ID
      */
     @Override
-    public void scale(Long id, Integer replicas) {
+    public Long scale(Long id, Integer replicas) {
+        log.info("提交调整副本数任务, id: {}, replicas: {}", id, replicas);
+        
+        // 校验副本数范围
+        if (replicas < MIN_REPLICAS || replicas > MAX_REPLICAS) {
+            throw new BusinessException(
+                String.format("副本数必须在%d-%d之间", MIN_REPLICAS, MAX_REPLICAS)
+            );
+        }
+        
+        AppService service = serviceMapper.selectById(id);
+        if (service == null) {
+            throw new BusinessException("服务不存在");
+        }
+        
+        // global 模式不支持手动扩缩容
+        if (isGlobalMode(service.getServiceMode())) {
+            throw new BusinessException("global 模式不支持手动扩缩容");
+        }
+        getEnvironmentOrThrow(service.getEnvironmentId());
+        
+        return deployTaskQueueService.submit(service.getEnvironmentId(), id, service.getName(),
+                "SCALE", () -> self.doScale(id, replicas));
+    }
+    
+    /**
+     * 调整副本数（队列 worker 线程内执行）
+     */
+    public void doScale(Long id, Integer replicas) {
         log.info("调整副本数, id: {}, replicas: {}", id, replicas);
         
         // 校验副本数范围
@@ -856,35 +987,5 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         
         log.info("Found {} available versions for service {}", versions.size(), service.getName());
         return versions;
-    }
-    
-    /**
-     * 流式推送副本日志（SSE）
-     */
-    @Override
-    public SseEmitter streamLogs(Long serviceId, String replicaId, Integer tail, Boolean follow) {
-        log.info("开始推送日志, serviceId: {}, replicaId: {}, tail: {}, follow: {}", 
-                serviceId, replicaId, tail, follow);
-        
-        // 查询服务信息
-        AppService service = serviceMapper.selectById(serviceId);
-        if (service == null) {
-            throw new BusinessException("服务不存在");
-        }
-        
-        // 获取环境信息
-        Environment environment = environmentMapper.selectById(service.getEnvironmentId());
-        if (environment == null) {
-            throw new BusinessException("环境不存在");
-        }
-        
-        String serviceName = service.getExternalServiceName() != null 
-            ? service.getExternalServiceName()
-            : service.getName().toLowerCase();
-
-        log.info("准备查询日志, 服务信息: name={}, externalServiceName={}, 最终使用serviceName={}, replicaId={}",
-                service.getName(), service.getExternalServiceName(), serviceName, replicaId);
-        
-        return deployService.streamServiceLogs(environment, serviceName, tail, follow);
     }
 }

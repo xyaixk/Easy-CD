@@ -296,7 +296,7 @@ function replicaLevelClass(v) {
 }
 
 .dialog-header {
-  padding: 1.25rem 1.75rem;
+  padding: 0.875rem 1.5rem;
   background: var(--primary-gradient);
   display: flex;
   align-items: center;
@@ -312,9 +312,9 @@ function replicaLevelClass(v) {
 }
 
 .header-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.2);
   display: flex;
   align-items: center;

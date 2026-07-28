@@ -6,7 +6,6 @@ import com.easy.cd.dto.ImageVersionDTO;
 import com.easy.cd.dto.ServiceStatusInfo;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -95,14 +94,4 @@ public interface DeployStrategy {
      * @return 服务状态信息列表
      */
     List<ServiceStatusInfo> collectServiceStatus(Environment environment, List<AppService> services);
-    
-    /**
-     * 流式推送服务聚合日志（SSE）
-     * @param environment 环境对象
-     * @param serviceName 服务名称
-     * @param tail 获取最后N行日志
-     * @param follow 是否持续推送新日志
-     * @return SseEmitter
-     */
-    SseEmitter streamServiceLogs(Environment environment, String serviceName, Integer tail, Boolean follow);
 }

@@ -3,13 +3,16 @@ package com.easy.cd.vo;
 import lombok.Data;
 
 /**
- * 单条日志记录返回。字段直接对应前端 LogSearchDialog 的列。
+ * 单条日志记录返回。
  */
 @Data
 public class LogItemVO {
 
     /** ISO-8601 时间字符串（@timestamp 原值） */
     private String timestamp;
+
+    /** 纳秒时间戳原值（字符串避免 JS 精度丢失），前端用作翻页游标/上下文锚点 */
+    private String tsNanos;
 
     /** 级别文本：INFO / WARN / ERROR / DEBUG */
     private String level;

@@ -25,12 +25,14 @@ mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
 
-# Loki日志检索配置
+# Loki 日志检索限制；连接地址和 namespace 在各环境中配置
 loki:
-  uri: http://172.21.49.8:3100
-  namespace: ysb
   # 单次查询上限（取“全部”时也不超过此值）
   max-result-window: 5000
+
+# 部署任务队列：写操作（create/update/rm/pull）SSH 命令超时，后台执行可放宽
+deploy:
+  ssh-timeout-ms: 600000
 
 # 监控采集配置
 monitor:

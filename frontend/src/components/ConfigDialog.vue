@@ -17,7 +17,10 @@ const emit = defineEmits(['update:visible', 'confirm'])
 const formData = ref({
   sshHosts: [{ host: '', port: 22, username: 'root', password: '', privateKey: '' }],
   registryUrl: '',
-  networkMode: 'overlay'
+  networkMode: 'overlay',
+  lokiUri: '',
+  lokiNamespace: 'ysb',
+  lokiAppEnv: ''
 })
 
 const isDockerSwarm = computed(() => {
@@ -28,7 +31,10 @@ const resetForm = () => {
   formData.value = {
     sshHosts: [{ host: '', port: 22, username: 'root', password: '', privateKey: '' }],
     registryUrl: '',
-    networkMode: 'overlay'
+    networkMode: 'overlay',
+    lokiUri: '',
+    lokiNamespace: 'ysb',
+    lokiAppEnv: ''
   }
 }
 
@@ -85,7 +91,10 @@ const loadConfig = () => {
     formData.value = {
       sshHosts,
       registryUrl: config.registryUrl || '',
-      networkMode: config.networkMode || 'overlay'
+      networkMode: config.networkMode || 'overlay',
+      lokiUri: config.lokiUri || '',
+      lokiNamespace: config.lokiNamespace || 'ysb',
+      lokiAppEnv: config.lokiAppEnv || props.environment?.name || ''
     }
   } catch (error) {
     console.error('解析配置失败:', error)
@@ -122,6 +131,18 @@ const validateForm = () => {
     alert('请输入默认镜像仓库地址')
     return false
   }
+  const lokiUri = formData.value.lokiUri.trim()
+  if (lokiUri) {
+    try {
+      const url = new URL(lokiUri)
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) {
+        throw new Error('invalid Loki URL')
+      }
+    } catch (error) {
+      alert('Loki 地址必须是有效的 HTTP/HTTPS 地址')
+      return false
+    }
+  }
   return true
 }
 
@@ -145,6 +166,12 @@ const handleConfirm = () => {
     swarmManagerHosts: validHosts,
     registryUrl: formData.value.registryUrl.trim(),
     networkMode: formData.value.networkMode
+  }
+  const lokiUri = formData.value.lokiUri.trim().replace(/\/+$/, '')
+  if (lokiUri) {
+    submitData.lokiUri = lokiUri
+    submitData.lokiNamespace = formData.value.lokiNamespace.trim()
+    submitData.lokiAppEnv = formData.value.lokiAppEnv.trim() || props.environment?.name || ''
   }
   
   emit('confirm', submitData)
@@ -251,6 +278,39 @@ onUnmounted(() => {
                 </select>
                 <div class="form-hint">Swarm集群推荐使用overlay网络模式</div>
               </div>
+
+              <div class="form-group">
+                <label>Loki 日志查询地址 <span class="optional">(可选)</span></label>
+                <input
+                  v-model="formData.lokiUri"
+                  type="url"
+                  placeholder="http://0.0.0.0:3100"
+                  class="form-input"
+                />
+                <div class="form-hint">配置后启用当前环境的 Loki 日志查询；留空时隐藏右上角日志按钮</div>
+              </div>
+
+              <div v-if="formData.lokiUri.trim()" class="form-group">
+                <label>Loki namespace <span class="optional">(可选)</span></label>
+                <input
+                  v-model="formData.lokiNamespace"
+                  type="text"
+                  placeholder="ysb"
+                  class="form-input"
+                />
+                <div class="form-hint">对应 Alloy 写入日志时的 namespace 标签；留空则不按该标签筛选</div>
+              </div>
+
+              <div v-if="formData.lokiUri.trim()" class="form-group">
+                <label>Loki app_env <span class="required">*</span></label>
+                <input
+                  v-model="formData.lokiAppEnv"
+                  type="text"
+                  :placeholder="environment?.name || 'release'"
+                  class="form-input"
+                />
+                <div class="form-hint">对应 Alloy 写入日志时的 app_env 标签；默认使用当前环境名称</div>
+              </div>
             </div>
             
             <div v-else class="empty-config">
@@ -303,7 +363,7 @@ onUnmounted(() => {
 }
 
 .dialog-header {
-  padding: 1.5rem 2rem;
+  padding: 0.875rem 1.5rem;
   background: var(--primary-gradient);
   color: white;
   display: flex;
@@ -320,9 +380,9 @@ onUnmounted(() => {
 }
 
 .header-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.2);
   display: flex;
   align-items: center;

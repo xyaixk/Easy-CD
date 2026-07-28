@@ -1,9 +1,12 @@
 <script setup>
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onUnmounted, defineAsyncComponent } from 'vue'
 import { getServiceReplicas } from '@/api/service'
 import { enrichWithMockMetrics } from '@/api/monitor'
 import LogViewerDialog from './LogViewerDialog.vue'
 import SparkLine from './monitor/SparkLine.vue'
+
+// 终端组件按需加载（xterm 体积大，拆到独立 chunk）
+const TerminalDialog = defineAsyncComponent(() => import('./TerminalDialog.vue'))
 
 const props = defineProps({
   visible: {
@@ -40,6 +43,140 @@ const setRange = (replica, range) => {
 const showLogViewer = ref(false)
 const selectedReplica = ref(null)
 
+// Web 终端对话框（进入容器）
+const showTerminal = ref(false)
+const terminalReplica = ref(null)
+
+// Docker 运行参数展开状态（默认收起）
+const showDockerParams = ref(false)
+
+// 内置 key 名单（与 ServiceDialog 保持一致，剩余 key 视为环境变量）
+const BUILT_IN_KEYS = new Set([
+  'replicas', 'cpus', 'memory', 'memory-reservation', 'cpu-reservation',
+  'restart', 'restart-max-attempts', 'restart-delay',
+  'publish', 'network', 'endpoint-mode',
+  'healthcheck', 'healthcheck_interval', 'healthcheck_timeout',
+  'healthcheck_retries', 'healthcheck_start_period',
+  'update_parallelism', 'update_delay', 'update_monitor',
+  'update_failure_action', 'update_order',
+  'rollback_parallelism', 'rollback_delay', 'rollback_monitor',
+  'rollback_failure_action', 'rollback_order',
+  'container-label', 'container-labels', 'mounts',
+  'log-driver', 'log-opts', 'command', 'constraints',
+  'stop-grace-period', 'replicas-max-per-node'
+])
+
+// 多值字段拆分（换行或逗号分隔）
+const splitMulti = (v) => {
+  if (v == null || v === '') return []
+  if (Array.isArray(v)) return v.map(x => String(x)).filter(x => x.trim())
+  const str = String(v)
+  const parts = str.includes('\n') ? str.split(/\r?\n/) : str.split(',')
+  return parts.map(x => x.trim()).filter(Boolean)
+}
+
+/**
+ * dockerParams (JSON) → 分类分组（与编辑弹窗同一套分类）
+ * 返回 null 表示解析失败（模板降级为原文展示）
+ */
+const dockerParamGroups = computed(() => {
+  let map = {}
+  try {
+    map = props.service?.dockerParams ? JSON.parse(props.service.dockerParams) : {}
+  } catch (_) {
+    return null
+  }
+  const groups = []
+  const push = (title, items) => {
+    const filtered = items.filter(it =>
+      Array.isArray(it.value) ? it.value.length > 0 : (it.value != null && it.value !== '')
+    )
+    if (filtered.length) groups.push({ title, items: filtered })
+  }
+
+  // 环境变量 = 剩余非内置 key（空值也展示）
+  const envItems = Object.entries(map)
+    .filter(([k]) => !BUILT_IN_KEYS.has(k))
+    .map(([k, v]) => ({ label: k, value: v == null ? '' : String(v) }))
+  if (envItems.length) groups.push({ title: '环境变量', items: envItems })
+
+  push('网络与端口', [
+    { label: 'network', value: map.network },
+    { label: 'endpoint-mode', value: map['endpoint-mode'] },
+    { label: 'publish', value: splitMulti(map.publish) }
+  ])
+  push('挂载卷', [
+    { label: 'mounts', value: splitMulti(map.mounts) }
+  ])
+  push('节点约束', [
+    { label: 'constraints', value: splitMulti(map.constraints) }
+  ])
+  push('资源限制', [
+    { label: 'limit-cpu', value: map.cpus },
+    { label: 'limit-memory', value: map.memory },
+    { label: 'reserve-memory', value: map['memory-reservation'] },
+    { label: 'reserve-cpu', value: map['cpu-reservation'] },
+    { label: 'replicas-max-per-node', value: map['replicas-max-per-node'] }
+  ])
+  push('重启策略', [
+    { label: 'restart', value: map.restart },
+    { label: 'max-attempts', value: map['restart-max-attempts'] },
+    { label: 'delay', value: map['restart-delay'] },
+    { label: 'stop-grace-period', value: map['stop-grace-period'] }
+  ])
+  push('健康检查', [
+    { label: 'cmd', value: map.healthcheck },
+    { label: 'interval', value: map.healthcheck_interval },
+    { label: 'timeout', value: map.healthcheck_timeout },
+    { label: 'retries', value: map.healthcheck_retries },
+    { label: 'start_period', value: map.healthcheck_start_period }
+  ])
+  push('滚动更新', [
+    { label: 'parallelism', value: map.update_parallelism },
+    { label: 'delay', value: map.update_delay },
+    { label: 'monitor', value: map.update_monitor },
+    { label: 'failure_action', value: map.update_failure_action },
+    { label: 'order', value: map.update_order }
+  ])
+  push('回滚策略', [
+    { label: 'parallelism', value: map.rollback_parallelism },
+    { label: 'delay', value: map.rollback_delay },
+    { label: 'monitor', value: map.rollback_monitor },
+    { label: 'failure_action', value: map.rollback_failure_action },
+    { label: 'order', value: map.rollback_order }
+  ])
+  // log-opts 可能是 JSON 字符串，展开为 key=value 行
+  let logOptLines = []
+  if (map['log-opts']) {
+    try {
+      const obj = typeof map['log-opts'] === 'string' ? JSON.parse(map['log-opts']) : map['log-opts']
+      logOptLines = Object.entries(obj).map(([k, v]) => `${k}=${v}`)
+    } catch (_) {
+      logOptLines = splitMulti(map['log-opts'])
+    }
+  }
+  push('日志与标签', [
+    { label: 'log-driver', value: map['log-driver'] },
+    { label: 'log-opts', value: logOptLines },
+    { label: 'labels', value: splitMulti(map['container-labels'] ?? map['container-label']) }
+  ])
+  push('启动命令', [
+    { label: 'command', value: map.command }
+  ])
+  return groups
+})
+
+// 当前选中的参数分类（tab 形式，默认第一个有值的分组）
+const activeParamGroup = ref('')
+const activeGroupTitle = computed(() => {
+  const groups = dockerParamGroups.value
+  if (!groups || !groups.length) return ''
+  return groups.some(g => g.title === activeParamGroup.value) ? activeParamGroup.value : groups[0].title
+})
+const currentGroup = computed(() =>
+  (dockerParamGroups.value || []).find(g => g.title === activeGroupTitle.value) || null
+)
+
 // 定时刷新相关
 let refreshTimer = null
 const REFRESH_INTERVAL = 10000 // 10秒刷新一次
@@ -48,6 +185,8 @@ const REFRESH_INTERVAL = 10000 // 10秒刷新一次
 watch(() => props.visible, (val) => {
   if (val) {
     document.body.style.overflow = 'hidden'
+    showDockerParams.value = false
+    activeParamGroup.value = ''
     loadReplicas()
     startAutoRefresh()
   } else {
@@ -154,13 +293,13 @@ const handleViewServiceLogs = () => {
   showLogViewer.value = true
 }
 
-// 副本操作按钮（暂无功能）
-const handleViewLogs = (replica) => {
-  console.log('副本日志功能暂未开放:', replica)
-}
+// 进入容器：打开 Web 终端（需要副本在运行中且已采到容器 ID）
+const canEnterContainer = (replica) => replica.status === 'running' && !!replica.containerId
 
 const handleEnterContainer = (replica) => {
-  console.log('进入容器功能暂未开放:', replica)
+  if (!canEnterContainer(replica)) return
+  terminalReplica.value = replica
+  showTerminal.value = true
 }
 
 // 字节格式化：<1024 => B，后面 KB/MB/GB，保留1 位小数
@@ -243,6 +382,63 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <!-- Docker 运行参数（可展开/收起，默认收起） -->
+            <div class="docker-params-section">
+              <button class="docker-params-toggle" @click="showDockerParams = !showDockerParams">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="4 17 10 11 4 5"/>
+                  <line x1="12" y1="19" x2="20" y2="19"/>
+                </svg>
+                <span>Docker 运行参数</span>
+                <svg
+                  class="toggle-arrow"
+                  :class="{ rotated: showDockerParams }"
+                  width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                >
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </button>
+              <div v-if="showDockerParams" class="docker-params-body">
+                <div class="params-row">
+                  <span class="params-label">镜像</span>
+                  <code class="params-value">{{ service.dockerImage || '-' }}</code>
+                </div>
+                <!-- 解析失败降级为原文展示 -->
+                <div v-if="dockerParamGroups === null" class="params-row">
+                  <span class="params-label">参数</span>
+                  <pre class="params-value params-pre">{{ service.dockerParams || '无' }}</pre>
+                </div>
+                <div v-else-if="!dockerParamGroups.length" class="params-empty">无运行参数</div>
+                <div v-else class="params-groups">
+                  <!-- 分类 tab chips：点哪个看哪个 -->
+                  <div class="params-tabs">
+                    <button
+                      v-for="group in dockerParamGroups"
+                      :key="group.title"
+                      class="params-tab"
+                      :class="{ active: group.title === activeGroupTitle }"
+                      @click="activeParamGroup = group.title"
+                    >
+                      {{ group.title }}
+                      <span class="params-tab-count">{{ group.items.length }}</span>
+                    </button>
+                  </div>
+                  <div v-if="currentGroup" class="params-detail">
+                    <template v-for="item in currentGroup.items" :key="item.label">
+                      <template v-if="Array.isArray(item.value)">
+                        <code v-for="(line, i) in item.value" :key="item.label + '-' + i" class="param-line">
+                          <span class="param-line-key">{{ item.label }}:</span>{{ line }}
+                        </code>
+                      </template>
+                      <code v-else class="param-line">
+                        <span class="param-line-key">{{ item.label }}:</span>{{ item.value || '-' }}
+                      </code>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div class="replicas-list">
               <div 
                 v-for="replica in replicas" 
@@ -273,23 +469,9 @@ onUnmounted(() => {
                     <div class="replica-actions-inline">
                       <button 
                         class="btn-icon" 
-                        @click="handleViewLogs(replica)"
-                        :disabled="true"
-                        title="副本日志功能暂未开放"
-                      >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                          <polyline points="14 2 14 8 20 8"/>
-                          <line x1="16" y1="13" x2="8" y2="13"/>
-                          <line x1="16" y1="17" x2="8" y2="17"/>
-                          <polyline points="10 9 9 9 8 9"/>
-                        </svg>
-                      </button>
-                      <button 
-                        class="btn-icon" 
                         @click="handleEnterContainer(replica)"
-                        :disabled="true"
-                        title="进入容器功能暂未开放"
+                        :disabled="!canEnterContainer(replica)"
+                        :title="canEnterContainer(replica) ? '进入容器终端' : '副本未运行或容器 ID 未采集，暂不可进入'"
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="4 17 10 11 4 5"/>
@@ -383,6 +565,14 @@ onUnmounted(() => {
       :service-id="service.id"
       @update:visible="showLogViewer = $event"
     />
+
+    <!-- Web 终端（进入容器） -->
+    <TerminalDialog
+      :visible="showTerminal"
+      :service-id="service.id"
+      :replica="terminalReplica || {}"
+      @update:visible="showTerminal = $event"
+    />
   </Teleport>
 </template>
 
@@ -412,7 +602,7 @@ onUnmounted(() => {
 }
 
 .dialog-header {
-  padding: 1.5rem 2rem;
+  padding: 0.875rem 1.5rem;
   background: var(--primary-gradient);
   display: flex;
   align-items: center;
@@ -427,9 +617,9 @@ onUnmounted(() => {
 }
 
 .header-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.2);
   display: flex;
   align-items: center;
@@ -563,6 +753,185 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+/* Docker 运行参数折叠区 */
+.docker-params-section {
+  margin: -1rem 0 1.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.docker-params-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.875rem 1.25rem;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.docker-params-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.docker-params-toggle svg:first-child {
+  color: var(--primary-color);
+}
+
+.toggle-arrow {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  transition: transform 0.2s;
+}
+
+.toggle-arrow.rotated {
+  transform: rotate(180deg);
+}
+
+.docker-params-body {
+  padding: 0 1.25rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 0.875rem;
+}
+
+.params-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.params-label {
+  flex-shrink: 0;
+  width: 40px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.params-value {
+  flex: 1;
+  min-width: 0;
+  font-family: 'Courier New', monospace;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.params-pre {
+  margin: 0;
+  padding: 0.625rem 0.75rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.params-empty {
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+  padding: 0.25rem 0;
+}
+
+/* 分类 tab 式展示（与编辑弹窗同一套分类） */
+.params-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.params-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.params-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1;
+}
+
+.params-tab:hover:not(.active) {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.params-tab.active {
+  background: var(--primary-color);
+  border-color: var(--primary-color);
+  color: white;
+  box-shadow: 0 2px 6px rgba(102, 126, 234, 0.3);
+}
+
+.params-tab-count {
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  color: var(--primary-color);
+  line-height: 1.2;
+}
+
+.params-tab.active .params-tab-count {
+  background: rgba(255, 255, 255, 0.25);
+  color: white;
+}
+
+/* 当前分类的参数明细：每行 key: value */
+.params-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 0.875rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.param-line {
+  display: block;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  line-height: 1.6;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.param-line-key {
+  color: var(--primary-color);
+  font-weight: 700;
+  margin-right: 0.5rem;
 }
 
 .replica-card {

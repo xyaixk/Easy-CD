@@ -14,13 +14,17 @@ public class DockerParamsExtractor {
 
     /** Docker 内置参数 key，用于反向提取时区分环境变量 */
     public static final Set<String> BUILT_IN_KEYS = new HashSet<>(Arrays.asList(
-            "replicas", "cpus", "memory", "memory-reservation", "restart",
-            "restart-max-attempts", "restart-delay", "publish", "network",
+            "replicas", "cpus", "memory", "memory-reservation", "cpu-reservation",
+            "restart", "restart-max-attempts", "restart-delay",
+            "publish", "network", "endpoint-mode",
             "healthcheck", "healthcheck_interval", "healthcheck_timeout",
-            "healthcheck_retries", "healthcheck_start_period", "update_parallelism",
-            "update_delay", "update_monitor", "update_failure_action", "update_order",
+            "healthcheck_retries", "healthcheck_start_period",
+            "update_parallelism", "update_delay", "update_monitor",
+            "update_failure_action", "update_order",
+            "rollback_parallelism", "rollback_delay", "rollback_monitor",
+            "rollback_failure_action", "rollback_order",
             "mounts", "log-driver", "log-opts", "container-labels", "container-label",
-            "command"
+            "command", "constraints", "stop-grace-period", "replicas-max-per-node"
     ));
 
     private DockerParamsExtractor() {}
@@ -44,12 +48,17 @@ public class DockerParamsExtractor {
             extractResources(taskTemplate, params);
             extractRestartPolicy(taskTemplate, params);
             extractPorts(spec, params);
+            extractEndpointMode(spec, params);
             extractHealthcheck(containerSpec, params);
             extractUpdateConfig(spec, params);
+            extractRollbackConfig(spec, params);
             extractMounts(containerSpec, params);
             extractLogDriver(taskTemplate, params);
             extractContainerLabels(containerSpec, params);
             extractNetworks(taskTemplate, params);
+            extractConstraints(taskTemplate, params);
+            extractPlacementMaxPerNode(taskTemplate, params);
+            extractStopGracePeriod(containerSpec, params);
             extractEnvVars(containerSpec, params);
             extractCommand(containerSpec, params);
         } catch (Exception ignored) {
@@ -77,6 +86,10 @@ public class DockerParamsExtractor {
             Long memReserv = reservations.getLong("MemoryBytes");
             if (memReserv != null && memReserv > 0) {
                 params.put("memory-reservation", formatMemory(memReserv));
+            }
+            Long cpuReserv = reservations.getLong("NanoCPUs");
+            if (cpuReserv != null && cpuReserv > 0) {
+                params.put("cpu-reservation", String.format("%.2f", cpuReserv / 1_000_000_000.0));
             }
         }
     }
@@ -164,6 +177,10 @@ public class DockerParamsExtractor {
         if (delay != null && delay > 0) {
             params.put("update_delay", nanoToSeconds(delay) + "s");
         }
+        Long monitor = updateConfig.getLong("Monitor");
+        if (monitor != null && monitor > 0) {
+            params.put("update_monitor", nanoToSeconds(monitor) + "s");
+        }
         String failureAction = updateConfig.getString("FailureAction");
         if (failureAction != null) {
             params.put("update_failure_action", failureAction);
@@ -171,6 +188,32 @@ public class DockerParamsExtractor {
         String order = updateConfig.getString("Order");
         if (order != null) {
             params.put("update_order", order);
+        }
+    }
+
+    private static void extractRollbackConfig(JSONObject spec, Map<String, Object> params) {
+        JSONObject rollbackConfig = spec.getJSONObject("RollbackConfig");
+        if (rollbackConfig == null) return;
+
+        Integer parallelism = rollbackConfig.getInteger("Parallelism");
+        if (parallelism != null) {
+            params.put("rollback_parallelism", parallelism);
+        }
+        Long delay = rollbackConfig.getLong("Delay");
+        if (delay != null && delay > 0) {
+            params.put("rollback_delay", nanoToSeconds(delay) + "s");
+        }
+        Long monitor = rollbackConfig.getLong("Monitor");
+        if (monitor != null && monitor > 0) {
+            params.put("rollback_monitor", nanoToSeconds(monitor) + "s");
+        }
+        String failureAction = rollbackConfig.getString("FailureAction");
+        if (failureAction != null) {
+            params.put("rollback_failure_action", failureAction);
+        }
+        String order = rollbackConfig.getString("Order");
+        if (order != null) {
+            params.put("rollback_order", order);
         }
     }
 
@@ -235,6 +278,49 @@ public class DockerParamsExtractor {
             if (target != null && !params.containsKey("network")) {
                 params.put("network", target);
             }
+        }
+    }
+
+    private static void extractConstraints(JSONObject taskTemplate, Map<String, Object> params) {
+        JSONObject placement = taskTemplate.getJSONObject("Placement");
+        if (placement == null) return;
+        JSONArray constraints = placement.getJSONArray("Constraints");
+        if (constraints == null || constraints.isEmpty()) return;
+
+        List<String> list = new ArrayList<>();
+        for (int i = 0; i < constraints.size(); i++) {
+            String c = constraints.getString(i);
+            if (c != null && !c.trim().isEmpty()) list.add(c.trim());
+        }
+        if (!list.isEmpty()) {
+            params.put("constraints", String.join("\n", list));
+        }
+    }
+
+    private static void extractPlacementMaxPerNode(JSONObject taskTemplate, Map<String, Object> params) {
+        JSONObject placement = taskTemplate.getJSONObject("Placement");
+        if (placement == null) return;
+        Integer maxReplicas = placement.getInteger("MaxReplicas");
+        if (maxReplicas != null && maxReplicas > 0) {
+            params.put("replicas-max-per-node", maxReplicas);
+        }
+    }
+
+    private static void extractStopGracePeriod(JSONObject containerSpec, Map<String, Object> params) {
+        if (containerSpec == null) return;
+        Long stopGrace = containerSpec.getLong("StopGracePeriod");
+        if (stopGrace != null && stopGrace > 0) {
+            params.put("stop-grace-period", nanoToSeconds(stopGrace) + "s");
+        }
+    }
+
+    private static void extractEndpointMode(JSONObject spec, Map<String, Object> params) {
+        JSONObject endpointSpec = spec.getJSONObject("EndpointSpec");
+        if (endpointSpec == null) return;
+        String mode = endpointSpec.getString("Mode");
+        if (mode != null && !"vip".equalsIgnoreCase(mode)) {
+            // 仅在非默认值时记录（vip 是 Docker 默认）
+            params.put("endpoint-mode", mode.toLowerCase());
         }
     }
 

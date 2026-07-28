@@ -19,6 +19,7 @@ import com.easy.cd.util.SshExecutor.SshHost;
 import com.easy.cd.util.SshExecutor.SshResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -26,7 +27,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.time.LocalDateTime;
@@ -46,6 +46,10 @@ public class DockerDeployStrategy implements DeployStrategy {
     private final EnvironmentMapper environmentMapper;
     private final ServiceMapper serviceMapper;
     private final SshExecutor sshExecutor;
+
+    /** 写操作（create/update/rm/pull）SSH 超时，队列内后台执行可放宽；只读命令仍用默认 30s */
+    @Value("${deploy.ssh-timeout-ms:600000}")
+    private int writeSshTimeoutMs;
 
     private RestTemplate restTemplate;
     {
@@ -151,7 +155,7 @@ public class DockerDeployStrategy implements DeployStrategy {
             String serviceName = resolveServiceName(appService, environment);
 
             SshResult result = sshExecutor.executeCommandWithFailover(sshHosts,
-                    "docker service rm " + serviceName);
+                    "docker service rm " + serviceName, writeSshTimeoutMs);
 
             if (!result.isSuccess()) {
                 log.warn("停止服务返回非零: {}", result.getStderr());
@@ -198,7 +202,7 @@ public class DockerDeployStrategy implements DeployStrategy {
             }
 
             SshResult result = sshExecutor.executeCommandWithFailover(sshHosts,
-                    "docker service update --force " + serviceName);
+                    "docker service update --force " + serviceName, writeSshTimeoutMs);
 
             if (!result.isSuccess()) {
                 return DeployResult.failure("重启失败: " + result.getStderr());
@@ -228,9 +232,9 @@ public class DockerDeployStrategy implements DeployStrategy {
             String newImage = replaceImageTag(appService.getDockerImage(), targetVersion);
             log.info("回滚镜像: {} -> {}", appService.getDockerImage(), newImage);
 
-            sshExecutor.executeCommandWithFailover(sshHosts, "docker pull " + newImage);
+            sshExecutor.executeCommandWithFailover(sshHosts, "docker pull " + newImage, writeSshTimeoutMs);
             SshResult result = sshExecutor.executeCommandWithFailover(sshHosts,
-                    "docker service update --image " + newImage + " --force " + serviceName);
+                    "docker service update --image " + newImage + " --force " + serviceName, writeSshTimeoutMs);
 
             if (!result.isSuccess()) {
                 return DeployResult.failure("回滚失败: " + result.getStderr());
@@ -263,7 +267,7 @@ public class DockerDeployStrategy implements DeployStrategy {
             String serviceName = resolveServiceName(appService, environment);
 
             SshResult result = sshExecutor.executeCommandWithFailover(sshHosts,
-                    "docker service update --replicas " + replicas + " " + serviceName);
+                    "docker service update --replicas " + replicas + " " + serviceName, writeSshTimeoutMs);
 
             if (!result.isSuccess()) {
                 return DeployResult.failure("调整副本数失败: " + result.getStderr());
@@ -294,7 +298,7 @@ public class DockerDeployStrategy implements DeployStrategy {
             String serviceName = resolveServiceName(appService, environment);
 
             SshResult result = sshExecutor.executeCommandWithFailover(sshHosts,
-                    "docker service rm " + serviceName);
+                    "docker service rm " + serviceName, writeSshTimeoutMs);
 
             if (!result.isSuccess()) {
                 log.warn("删除服务返回非零: {}", result.getStderr());
@@ -545,152 +549,7 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
         return 1;
     }
-
-    // ======================== 日志 ========================
-
-    @Override
-    public SseEmitter streamServiceLogs(Environment environment, String serviceName, Integer tail, Boolean follow) {
-        log.info("获取服务日志: serviceName={}, tail={}, follow={}", serviceName, tail, follow);
-        SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
-
-        java.util.concurrent.atomic.AtomicBoolean stopped = new java.util.concurrent.atomic.AtomicBoolean(false);
-        boolean isFollow = Boolean.TRUE.equals(follow);
-
-        // follow 模式开启 SSE 心跳，避免 docker logs 无输出时中间层判定连接死掉、前端 EventSource 自动重连
-        java.util.concurrent.ScheduledExecutorService heartbeat = isFollow
-                ? java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
-                    Thread t = new Thread(r, "sse-log-heartbeat");
-                    t.setDaemon(true);
-                    return t;
-                })
-                : null;
-
-        emitter.onCompletion(() -> {
-            stopped.set(true);
-            if (heartbeat != null) heartbeat.shutdownNow();
-        });
-        emitter.onTimeout(() -> {
-            stopped.set(true);
-            if (heartbeat != null) heartbeat.shutdownNow();
-            emitter.complete();
-        });
-        emitter.onError(e -> {
-            stopped.set(true);
-            if (heartbeat != null) heartbeat.shutdownNow();
-        });
-
-        if (heartbeat != null) {
-            heartbeat.scheduleAtFixedRate(() -> {
-                if (stopped.get()) return;
-                try {
-                    // SSE 注释心跳（": ...\n\n"），前端 EventSource 会静默忽略但保持连接活
-                    emitter.send(SseEmitter.event().comment("hb"));
-                } catch (Exception e) {
-                    stopped.set(true);
-                }
-            }, 15, 15, java.util.concurrent.TimeUnit.SECONDS);
-        }
-
-        new Thread(() -> {
-            try {
-                Map<String, Object> config = parseConfig(environment.getConfig());
-                List<SshHost> sshHosts = parseSshHostsFromConfig(config);
-                if (sshHosts.isEmpty()) {
-                    emitter.completeWithError(new RuntimeException("SSH 地址未配置"));
-                    return;
-                }
-
-                int effectiveTail = (tail != null && tail > 0) ? Math.min(tail, 1000) : 100;
-                String cmd = "docker service logs " + serviceName
-                        + " --tail " + effectiveTail
-                        + " --since 10m --no-trunc"
-                        + (isFollow ? " --follow" : "");
-
-                if (isFollow) {
-                    // 生产者-消费者解耦：SSH read 只 offer 队列，独立 sender 线程负责 emitter.send，
-                    // 避免 send 阻塞（客户端消费慢、Servlet output buffer 满）反压到 SSH 读取，
-                    // 导致日志“卡一会儿→爆刷一屏”的停顿现象
-                    java.util.concurrent.BlockingQueue<String> queue = new java.util.concurrent.LinkedBlockingQueue<>(10000);
-                    java.util.concurrent.atomic.AtomicBoolean readerDone = new java.util.concurrent.atomic.AtomicBoolean(false);
-
-                    Thread sender = new Thread(() -> {
-                        try {
-                            while (!stopped.get()) {
-                                String line = queue.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
-                                if (line == null) {
-                                    if (readerDone.get() && queue.isEmpty()) break;
-                                    continue;
-                                }
-                                try {
-                                    emitter.send(SseEmitter.event().data(line).name("log"));
-                                } catch (Exception e) {
-                                    log.debug("SSE 发送失败，客户端已断开: {}", e.getMessage());
-                                    stopped.set(true);
-                                    break;
-                                }
-                            }
-                        } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }, "sse-log-sender");
-                    sender.setDaemon(true);
-                    sender.start();
-
-                    try {
-                        // 流式模式：SSH read 只入队，不限时
-                        sshExecutor.executeCommandStreamingWithFailover(sshHosts, cmd, (line, isStderr) -> {
-                            if (stopped.get()) return false;
-                            if (line == null || line.trim().isEmpty()) return true;
-                            // 非阻塞入队；队满则丢队首（drop-oldest，保护 SSH read 不被反压）
-                            while (!queue.offer(line)) {
-                                queue.poll();
-                            }
-                            return true;
-                        }, 0);
-                    } finally {
-                        readerDone.set(true);
-                        // 等 sender 将队尾日志冲刷完毕，避漏推
-                        try { sender.join(3000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                    }
-                    if (!stopped.get()) emitter.complete();
-                } else {
-                    // 非 follow 模式：一次性拉取
-                    SshResult result = sshExecutor.executeCommandWithFailover(sshHosts, cmd);
-                    String output = "";
-                    if (result.hasOutput()) {
-                        output = result.getStdout();
-                    } else if (result.getStderr() != null && !result.getStderr().trim().isEmpty()) {
-                        output = result.getStderr();
-                    }
-                    if (!output.isEmpty()) {
-                        String[] lines = output.split("\n");
-                        for (String line : lines) {
-                            if (stopped.get()) break;
-                            if (!line.trim().isEmpty()) {
-                                emitter.send(SseEmitter.event().data(line).name("log"));
-                            }
-                        }
-                    } else {
-                        emitter.send(SseEmitter.event().data("--- 无日志输出 ---").name("log"));
-                    }
-                    emitter.complete();
-                }
-            } catch (Exception e) {
-                log.warn("获取服务日志失败: {}", e.getMessage());
-                try {
-                    if (!stopped.get()) {
-                        emitter.send(SseEmitter.event().data("获取日志失败: " + e.getMessage()).name("log"));
-                    }
-                } catch (IOException ignored) {}
-                emitter.completeWithError(e);
-            } finally {
-                if (heartbeat != null) heartbeat.shutdownNow();
-            }
-        }).start();
-
-        return emitter;
-    }
-
+    
     // ======================== 镜像版本 ========================
 
     @Override
@@ -769,7 +628,7 @@ public class DockerDeployStrategy implements DeployStrategy {
         cmd.append(" ").append(imageName);
         appendCommandArgs(cmd, dockerParams);
 
-        SshResult result = sshExecutor.executeCommandWithFailover(sshHosts, cmd.toString());
+        SshResult result = sshExecutor.executeCommandWithFailover(sshHosts, cmd.toString(), writeSshTimeoutMs);
         if (!result.isSuccess()) {
             throw new RuntimeException("创建服务失败: " + result.getStderr());
         }
@@ -784,7 +643,7 @@ public class DockerDeployStrategy implements DeployStrategy {
         // 仅在镜像地址真的变化时才 pull，避免仅编辑配置时意外刷新 latest
         if (!sameImage(currentImage, imageName)) {
             log.info("镜像变更[{} → {}]，拉取新镜像", currentImage, imageName);
-            sshExecutor.executeCommandWithFailover(sshHosts, "docker pull " + imageName);
+            sshExecutor.executeCommandWithFailover(sshHosts, "docker pull " + imageName, writeSshTimeoutMs);
         } else {
             log.info("镜像未变更，跳过 docker pull: {}", imageName);
         }
@@ -802,7 +661,7 @@ public class DockerDeployStrategy implements DeployStrategy {
         cmd.append(" --force");
         cmd.append(" ").append(serviceName);
 
-        SshResult result = sshExecutor.executeCommandWithFailover(sshHosts, cmd.toString());
+        SshResult result = sshExecutor.executeCommandWithFailover(sshHosts, cmd.toString(), writeSshTimeoutMs);
         if (!result.isSuccess()) {
             throw new RuntimeException("更新服务失败: " + result.getStderr());
         }
@@ -871,6 +730,14 @@ public class DockerDeployStrategy implements DeployStrategy {
         if (dockerParams.containsKey("memory-reservation")) {
             cmd.append(" --reserve-memory ").append(dockerParams.get("memory-reservation"));
         }
+        if (dockerParams.containsKey("cpu-reservation")) {
+            cmd.append(" --reserve-cpu ").append(dockerParams.get("cpu-reservation"));
+        }
+
+        // 每节点最大副本数
+        if (dockerParams.containsKey("replicas-max-per-node")) {
+            cmd.append(" --replicas-max-per-node ").append(dockerParams.get("replicas-max-per-node"));
+        }
 
         // 重启策略（直接传原始值: any / none / on-failure）
         if (dockerParams.containsKey("restart")) {
@@ -883,6 +750,11 @@ public class DockerDeployStrategy implements DeployStrategy {
             cmd.append(" --restart-delay ").append(dockerParams.get("restart-delay"));
         }
 
+        // 停止优雅期
+        if (dockerParams.containsKey("stop-grace-period")) {
+            cmd.append(" --stop-grace-period ").append(dockerParams.get("stop-grace-period"));
+        }
+
         // 端口映射（换行或逗号分隔，单条内容支持 kv 完整格式）
         // create 用 --publish；update 用 --publish-add（仅追加，不做 rm）
         if (dockerParams.containsKey("publish")) {
@@ -890,6 +762,11 @@ public class DockerDeployStrategy implements DeployStrategy {
             for (String p : splitMultiValue(dockerParams.get("publish"))) {
                 cmd.append(publishFlag).append(p);
             }
+        }
+
+        // 端点模式
+        if (dockerParams.containsKey("endpoint-mode")) {
+            cmd.append(" --endpoint-mode ").append(dockerParams.get("endpoint-mode"));
         }
 
         // 健康检查
@@ -910,11 +787,31 @@ public class DockerDeployStrategy implements DeployStrategy {
         if (dockerParams.containsKey("update_delay")) {
             cmd.append(" --update-delay ").append(dockerParams.get("update_delay"));
         }
+        if (dockerParams.containsKey("update_monitor")) {
+            cmd.append(" --update-monitor ").append(dockerParams.get("update_monitor"));
+        }
         if (dockerParams.containsKey("update_failure_action")) {
             cmd.append(" --update-failure-action ").append(dockerParams.get("update_failure_action"));
         }
         if (dockerParams.containsKey("update_order")) {
             cmd.append(" --update-order ").append(dockerParams.get("update_order"));
+        }
+
+        // 回滚策略
+        if (dockerParams.containsKey("rollback_parallelism")) {
+            cmd.append(" --rollback-parallelism ").append(dockerParams.get("rollback_parallelism"));
+        }
+        if (dockerParams.containsKey("rollback_delay")) {
+            cmd.append(" --rollback-delay ").append(dockerParams.get("rollback_delay"));
+        }
+        if (dockerParams.containsKey("rollback_monitor")) {
+            cmd.append(" --rollback-monitor ").append(dockerParams.get("rollback_monitor"));
+        }
+        if (dockerParams.containsKey("rollback_failure_action")) {
+            cmd.append(" --rollback-failure-action ").append(dockerParams.get("rollback_failure_action"));
+        }
+        if (dockerParams.containsKey("rollback_order")) {
+            cmd.append(" --rollback-order ").append(dockerParams.get("rollback_order"));
         }
 
         // 挂载卷：每条可以是 `src:dst[:ro]` 旧格式，或 `type=bind,src=X,dst=Y[,readonly]` 新格式（直接透传）
@@ -947,6 +844,15 @@ public class DockerDeployStrategy implements DeployStrategy {
         // 容器标签
         appendContainerLabels(cmd, dockerParams, update);
 
+        // 节点约束
+        // create 用 --constraint；update 用 --constraint-add
+        if (dockerParams.containsKey("constraints")) {
+            String constraintFlag = update ? " --constraint-add " : " --constraint ";
+            for (String c : splitMultiValue(dockerParams.get("constraints"))) {
+                cmd.append(constraintFlag).append("'").append(c).append("'");
+            }
+        }
+
         // 剩余未识别的 key 作为环境变量
         // create 用 --env；update 用 --env-add
         String envFlag = update ? " --env-add " : " --env ";
@@ -967,17 +873,38 @@ public class DockerDeployStrategy implements DeployStrategy {
         diffSingle(cmd, "--limit-cpu", oldP.get("cpus"), newP.get("cpus"), "0");
         diffSingle(cmd, "--limit-memory", oldP.get("memory"), newP.get("memory"), "0");
         diffSingle(cmd, "--reserve-memory", oldP.get("memory-reservation"), newP.get("memory-reservation"), "0");
+        diffSingle(cmd, "--reserve-cpu", oldP.get("cpu-reservation"), newP.get("cpu-reservation"), "0");
+
+        // 每节点最大副本数
+        diffSingle(cmd, "--replicas-max-per-node", oldP.get("replicas-max-per-node"), newP.get("replicas-max-per-node"), "0");
 
         // 重启策略
         diffSingle(cmd, "--restart-condition", oldP.get("restart"), newP.get("restart"), "any");
         diffSingle(cmd, "--restart-max-attempts", oldP.get("restart-max-attempts"), newP.get("restart-max-attempts"), "0");
         diffSingle(cmd, "--restart-delay", oldP.get("restart-delay"), newP.get("restart-delay"), "5s");
 
-        // 滑动更新策略
+        // 停止优雅期
+        diffSingle(cmd, "--stop-grace-period", oldP.get("stop-grace-period"), newP.get("stop-grace-period"), "10s");
+
+        // 滚动更新策略
         diffSingle(cmd, "--update-parallelism", oldP.get("update_parallelism"), newP.get("update_parallelism"), "1");
         diffSingle(cmd, "--update-delay", oldP.get("update_delay"), newP.get("update_delay"), "0s");
+        diffSingle(cmd, "--update-monitor", oldP.get("update_monitor"), newP.get("update_monitor"), "5s");
         diffSingle(cmd, "--update-failure-action", oldP.get("update_failure_action"), newP.get("update_failure_action"), "pause");
         diffSingle(cmd, "--update-order", oldP.get("update_order"), newP.get("update_order"), "stop-first");
+
+        // 回滚策略
+        diffSingle(cmd, "--rollback-parallelism", oldP.get("rollback_parallelism"), newP.get("rollback_parallelism"), "1");
+        diffSingle(cmd, "--rollback-delay", oldP.get("rollback_delay"), newP.get("rollback_delay"), "0s");
+        diffSingle(cmd, "--rollback-monitor", oldP.get("rollback_monitor"), newP.get("rollback_monitor"), "5s");
+        diffSingle(cmd, "--rollback-failure-action", oldP.get("rollback_failure_action"), newP.get("rollback_failure_action"), "pause");
+        diffSingle(cmd, "--rollback-order", oldP.get("rollback_order"), newP.get("rollback_order"), "stop-first");
+
+        // 端点模式（无法真正清空，仅在新值不同时覆盖）
+        String oldEp = str(oldP.get("endpoint-mode")), newEp = str(newP.get("endpoint-mode"));
+        if (newEp != null && !newEp.equals(oldEp)) {
+            cmd.append(" --endpoint-mode ").append(newEp);
+        }
 
         // 日志驱动（无法真正清空，仅在新值不同时覆盖）
         String oldLd = str(oldP.get("log-driver")), newLd = str(newP.get("log-driver"));
@@ -1008,6 +935,8 @@ public class DockerDeployStrategy implements DeployStrategy {
                 newP.get("container-labels") != null ? newP.get("container-labels") : newP.get("container-label"));
         // 单值但需 add/rm：网络
         diffNetwork(cmd, oldP.get("network"), newP.get("network"));
+        // 多值：节点约束
+        diffConstraint(cmd, oldP.get("constraints"), newP.get("constraints"));
 
         // 环境变量（非内置 key）
         diffEnv(cmd, oldP, newP);
@@ -1108,6 +1037,22 @@ public class DockerDeployStrategy implements DeployStrategy {
         if (Objects.equals(o, n)) return;
         if (o != null) cmd.append(" --network-rm ").append(o);
         if (n != null) cmd.append(" --network-add ").append(n);
+    }
+
+    /** 节点约束 diff：整条字符串作为 key，新增 --constraint-add，删除 --constraint-rm */
+    private void diffConstraint(StringBuilder cmd, Object oldVal, Object newVal) {
+        Set<String> oldSet = new LinkedHashSet<>(splitMultiValue(oldVal));
+        Set<String> newSet = new LinkedHashSet<>(splitMultiValue(newVal));
+        for (String c : newSet) {
+            if (!oldSet.contains(c)) {
+                cmd.append(" --constraint-add '").append(c).append("'");
+            }
+        }
+        for (String c : oldSet) {
+            if (!newSet.contains(c)) {
+                cmd.append(" --constraint-rm '").append(c).append("'");
+            }
+        }
     }
 
     /** 环境变量 diff：非内置 key 都当作 env */
@@ -1346,17 +1291,22 @@ public class DockerDeployStrategy implements DeployStrategy {
 
     private boolean isDockerBuiltInParam(String key) {
         return key.equals("replicas") || key.equals("cpus") || key.equals("memory") ||
-                key.equals("memory-reservation") || key.equals("restart") ||
+                key.equals("memory-reservation") || key.equals("cpu-reservation") ||
+                key.equals("restart") ||
                 key.equals("restart-max-attempts") || key.equals("restart-delay") ||
-                key.equals("publish") || key.equals("network") ||
+                key.equals("publish") || key.equals("network") || key.equals("endpoint-mode") ||
                 key.equals("healthcheck") || key.equals("healthcheck_interval") ||
                 key.equals("healthcheck_timeout") || key.equals("healthcheck_retries") ||
                 key.equals("healthcheck_start_period") || key.equals("update_parallelism") ||
                 key.equals("update_delay") || key.equals("update_monitor") ||
                 key.equals("update_failure_action") || key.equals("update_order") ||
+                key.equals("rollback_parallelism") || key.equals("rollback_delay") ||
+                key.equals("rollback_monitor") || key.equals("rollback_failure_action") ||
+                key.equals("rollback_order") ||
                 key.equals("container-label") || key.equals("container-labels") ||
                 key.equals("mounts") || key.equals("log-driver") || key.equals("log-opts") ||
-                key.equals("command");
+                key.equals("command") || key.equals("constraints") ||
+                key.equals("stop-grace-period") || key.equals("replicas-max-per-node");
     }
 
     /** 镜像后追加用户自定义启动命令（对应 docker service create ... IMAGE [COMMAND] [ARG...]） */

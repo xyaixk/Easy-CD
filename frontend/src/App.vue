@@ -7,7 +7,8 @@ import ServiceDialog from './components/ServiceDialog.vue'
 import ReplicasDialog from './components/ReplicasDialog.vue'
 import ConfigDialog from './components/ConfigDialog.vue'
 import LoginDialog from './components/LoginDialog.vue'
-import LogSearchDialog from './components/LogSearchDialog.vue'
+import LogsPage from './components/logs/LogsPage.vue'
+import TaskDrawer from './components/TaskDrawer.vue'
 import HostMetricStrip from './components/monitor/HostMetricStrip.vue'
 import HostDetailDialog from './components/monitor/HostDetailDialog.vue'
 import toast from '@/utils/toast'
@@ -65,11 +66,34 @@ const handleOpenLogin = () => {
   showLoginDialog.value = true
 }
 
-// 打开日志查询面板
-const showLogSearchDialog = ref(false)
+// 主内容区视图切换：deploy 部署视图 / logs 日志视图（v-show 保留查询现场）
+const activeView = ref('deploy')
+const logsViewOpened = ref(false)
 
 const handleOpenLogs = () => {
-  showLogSearchDialog.value = true
+  activeView.value = 'logs'
+  logsViewOpened.value = true
+}
+
+// 部署任务抽屉
+const showTaskDrawer = ref(false)
+const activeTaskCount = ref(0)
+const taskDrawerRef = ref(null)
+
+const handleOpenTasks = () => {
+  showTaskDrawer.value = true
+}
+
+// 任务提交成功后：提示 + 打开抽屉并立即刷新
+const onTaskSubmitted = (taskId, message) => {
+  toast.success(`${message}，任务 #${taskId} 已提交`)
+  showTaskDrawer.value = true
+  taskDrawerRef.value?.refresh()
+}
+
+// 任务执行结束（成功/失败）时刷新服务列表
+const handleTaskFinished = async () => {
+  await loadServices()
 }
 
 // 宿主机详情弹窗
@@ -456,21 +480,18 @@ const handleDeleteEnvironment = async (envId) => {
   }
 }
 
-// 服务操作方法
+// 服务操作方法（均为异步：提交后返回任务ID，实际执行在后台队列）
 // 更新操作：重新部署服务（拉取最新镜像）
 const updateService = async (service) => {
   try {
-    // 调用后端的 update 接口，触发重新部署
-    // 后端会重新拉取镜像并执行滚动更新
-    await updateServiceApi(service.id, {
+    const taskId = await updateServiceApi(service.id, {
       name: service.name,
       description: service.description,
       dockerImage: service.dockerImage,
       dockerParams: service.dockerParams,
       replicas: service.replicas || 1
     })
-    toast.success(`服务「${service.name}」更新部署成功`)
-    await loadServices()
+    onTaskSubmitted(taskId, `服务「${service.name}」更新部署`)
   } catch (error) {
     console.error('更新服务失败:', error)
     toast.error(error.message || '更新失败，请重试')
@@ -479,9 +500,8 @@ const updateService = async (service) => {
 
 const rollbackServiceHandler = async ({ service, version }) => {
   try {
-    await rollbackService(service.id, version)
-    toast.success(`服务「${service.name}」回滚成功`)
-    await loadServices()
+    const taskId = await rollbackService(service.id, version)
+    onTaskSubmitted(taskId, `服务「${service.name}」回滚到 ${version}`)
   } catch (error) {
     console.error('回滚服务失败:', error)
     toast.error(error.message || '回滚失败，请重试')
@@ -490,9 +510,8 @@ const rollbackServiceHandler = async ({ service, version }) => {
 
 const restartServiceHandler = async (service) => {
   try {
-    await restartService(service.id)
-    toast.success(`服务「${service.name}」重启成功`)
-    await loadServices()
+    const taskId = await restartService(service.id)
+    onTaskSubmitted(taskId, `服务「${service.name}」重启`)
   } catch (error) {
     console.error('重启服务失败:', error)
     toast.error(error.message || '重启失败，请重试')
@@ -501,9 +520,8 @@ const restartServiceHandler = async (service) => {
 
 const stopServiceHandler = async (service) => {
   try {
-    await stopService(service.id)
-    toast.success(`服务「${service.name}」已停止`)
-    await loadServices()
+    const taskId = await stopService(service.id)
+    onTaskSubmitted(taskId, `服务「${service.name}」停止`)
   } catch (error) {
     console.error('停止服务失败:', error)
     toast.error(error.message || '停止失败，请重试')
@@ -512,9 +530,8 @@ const stopServiceHandler = async (service) => {
 
 const scaleServiceHandler = async ({ service, replicas }) => {
   try {
-    await scaleService(service.id, replicas)
-    toast.success(`服务「${service.name}」副本数已调整为 ${replicas}`)
-    await loadServices()
+    const taskId = await scaleService(service.id, replicas)
+    onTaskSubmitted(taskId, `服务「${service.name}」副本数调整为 ${replicas}`)
   } catch (error) {
     console.error('调整副本失败:', error)
     toast.error(error.message || '调整副本失败，请重试')
@@ -533,9 +550,8 @@ const editConfig = (service) => {
 
 const deleteServiceHandler = async (service) => {
   try {
-    await deleteServiceApi(service.id)
-    toast.success(`服务「${service.name}」已删除`)
-    await loadServices()
+    const taskId = await deleteServiceApi(service.id)
+    onTaskSubmitted(taskId, `服务「${service.name}」删除`)
   } catch (error) {
     console.error('删除服务失败:', error)
     toast.error(error.message || '删除失败，请重试')
@@ -548,20 +564,18 @@ const handleAddService = () => {
   showServiceDialog.value = true
 }
 
-// 确认新增/编辑服务
+// 确认新增/编辑服务（异步提交）
 const handleConfirmService = async (serviceData) => {
   try {
     if (currentService.value) {
       // 编辑服务
-      const result = await updateServiceApi(currentService.value.id, serviceData)
-      toast.success(`服务「${result.name}」修改成功`)
+      const taskId = await updateServiceApi(currentService.value.id, serviceData)
+      onTaskSubmitted(taskId, `服务「${serviceData.name}」修改`)
     } else {
       // 新增服务
-      const result = await createServiceApi(serviceData)
-      toast.success(`服务「${result.name}」创建成功`)
+      const taskId = await createServiceApi(serviceData)
+      onTaskSubmitted(taskId, `服务「${serviceData.name}」创建`)
     }
-    // 重新加载服务列表
-    await loadServices()
   } catch (error) {
     console.error('保存服务失败:', error)
     toast.error(error.message || '保存失败，请重试')
@@ -572,20 +586,23 @@ const handleConfirmService = async (serviceData) => {
 <template>
   <div class="app-container">
     <AppHeader 
+      v-show="activeView === 'deploy'"
       :environments="environments"
       :selected-env="selectedEnv"
       :current-user="currentUser"
+      :active-task-count="activeTaskCount"
       @update:selectedEnv="selectedEnv = $event"
       @add-environment="handleAddEnvironment"
       @delete-environment="handleDeleteEnvironment"
       @open-config="handleOpenConfig"
       @open-logs="handleOpenLogs"
+      @open-tasks="handleOpenTasks"
       @open-login="handleOpenLogin"
       @logout="handleLogout"
     />
 
-    <!-- 主内容区 -->
-    <main class="main-content">
+    <!-- 主内容区（部署视图） -->
+    <main v-show="activeView === 'deploy'" class="main-content">
       <!-- 宿主机监控条 -->
       <HostMetricStrip
         :environment-id="selectedEnv"
@@ -678,6 +695,17 @@ const handleConfirmService = async (serviceData) => {
       </div>
     </main>
 
+    <!-- 日志视图（首次打开才挂载，之后 v-show 保留查询现场） -->
+    <div v-if="logsViewOpened" v-show="activeView === 'logs'" class="logs-view">
+      <LogsPage
+        :current-environment="currentEnvironmentInfo"
+        :environments="environments"
+        :active="activeView === 'logs'"
+        @back="activeView = 'deploy'"
+        @update:selected-env="selectedEnv = $event"
+      />
+    </div>
+
     <!-- 环境对话框 -->
     <EnvDialog
       :visible="showEnvDialog"
@@ -716,18 +744,21 @@ const handleConfirmService = async (serviceData) => {
       @confirm="handleLogin"
     />
 
-    <!-- 全局日志查询弹窗（全屏） -->
-    <LogSearchDialog
-      :visible="showLogSearchDialog"
-      :current-environment="currentEnvironmentInfo"
-      @update:visible="showLogSearchDialog = $event"
-    />
-
     <!-- 宿主机详情弹窗 -->
     <HostDetailDialog
       :visible="showHostDetail"
       :host="selectedHost"
       @update:visible="showHostDetail = $event"
+    />
+
+    <!-- 部署任务抽屉 -->
+    <TaskDrawer
+      ref="taskDrawerRef"
+      :visible="showTaskDrawer"
+      :environment-id="selectedEnv"
+      @update:visible="showTaskDrawer = $event"
+      @update:activeCount="activeTaskCount = $event"
+      @task-finished="handleTaskFinished"
     />
   </div>
 </template>
@@ -743,6 +774,14 @@ const handleConfirmService = async (serviceData) => {
   max-width: 1400px;
   margin: 0 auto;
   padding: 2rem;
+}
+
+/* 日志视图：隐藏 header，占满整个视口 */
+.logs-view {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* 工具栏 */

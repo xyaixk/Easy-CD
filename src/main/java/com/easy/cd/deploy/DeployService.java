@@ -10,7 +10,6 @@ import com.easy.cd.entity.Environment;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -110,14 +109,5 @@ public class DeployService {
     public List<ServiceStatusInfo> collectServiceStatus(String deployType, Environment environment, List<AppService> services) {
         DeployStrategy strategy = strategyFactory.getStrategy(deployType);
         return strategy.collectServiceStatus(environment, services);
-    }
-    
-    /**
-     * 流式推送服务聚合日志（SSE）
-     */
-    public SseEmitter streamServiceLogs(Environment environment, String serviceName, Integer tail, Boolean follow) {
-        log.info("获取服务日志, 类型: {}, 服务名: {}", environment.getDeployType(), serviceName);
-        DeployStrategy strategy = strategyFactory.getStrategy(environment.getDeployType());
-        return strategy.streamServiceLogs(environment, serviceName, tail, follow);
     }
 }

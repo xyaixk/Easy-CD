@@ -209,7 +209,7 @@ const validateInput = (e) => {
 }
 
 .dialog-header {
-  padding: 1.5rem 1.5rem 1rem;
+  padding: 1rem 1.5rem 0.75rem;
   border-bottom: 1px solid var(--border-color);
 }
 

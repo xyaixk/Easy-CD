@@ -172,7 +172,7 @@ onUnmounted(() => {
 }
 
 .dialog-header {
-  padding: 1.75rem 2rem;
+  padding: 0.875rem 1.5rem;
   border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
@@ -187,9 +187,9 @@ onUnmounted(() => {
 }
 
 .header-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   background: var(--primary-gradient);
   display: flex;
   align-items: center;

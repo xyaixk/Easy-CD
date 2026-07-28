@@ -125,6 +125,7 @@ export function parseDockerCommand(cmdText) {
     publish: [],
     mounts: [],
     'container-labels': [],
+    constraints: [],
     envs: []
   }
 
@@ -185,6 +186,9 @@ export function parseDockerCommand(cmdText) {
   }
   if (multiValues['container-labels'].length) {
     result.dockerParams['container-labels'] = multiValues['container-labels'].join('\n')
+  }
+  if (multiValues.constraints.length) {
+    result.dockerParams.constraints = multiValues.constraints.join('\n')
   }
   // 环境变量直接展开到 dockerParams
   for (const kv of multiValues.envs) {
@@ -314,6 +318,38 @@ function applyFlag(flag, value, result, multiValues) {
       result.dockerParams.update_order = value
       break
 
+    // 回滚策略
+    case '--rollback-parallelism':
+      result.dockerParams.rollback_parallelism = value
+      break
+    case '--rollback-delay':
+      result.dockerParams.rollback_delay = value
+      break
+    case '--rollback-monitor':
+      result.dockerParams.rollback_monitor = value
+      break
+    case '--rollback-failure-action':
+      result.dockerParams.rollback_failure_action = value
+      break
+    case '--rollback-order':
+      result.dockerParams.rollback_order = value
+      break
+
+    // 停止优雅期
+    case '--stop-grace-period':
+      result.dockerParams['stop-grace-period'] = value
+      break
+
+    // 端点模式
+    case '--endpoint-mode':
+      result.dockerParams['endpoint-mode'] = value
+      break
+
+    // 每节点最大副本数
+    case '--replicas-max-per-node':
+      result.dockerParams['replicas-max-per-node'] = value
+      break
+
     // 日志驱动
     case '--log-driver':
       result.dockerParams['log-driver'] = value
@@ -337,6 +373,11 @@ function applyFlag(flag, value, result, multiValues) {
     case '--label':
     case '--container-label':
       multiValues['container-labels'].push(value)
+      break
+
+    // 节点约束
+    case '--constraint':
+      multiValues.constraints.push(value)
       break
 
     default:

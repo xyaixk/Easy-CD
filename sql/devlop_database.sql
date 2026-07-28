@@ -270,4 +270,26 @@ CREATE TABLE `alert_event` (
   INDEX `idx_fired_time`(`fired_time`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '告警事件表' ROW_FORMAT = Dynamic;
 
+-- ----------------------------
+-- Table structure for deploy_task (部署操作异步任务)
+-- ----------------------------
+DROP TABLE IF EXISTS `deploy_task`;
+CREATE TABLE `deploy_task` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '任务ID',
+  `environment_id` bigint NOT NULL COMMENT '环境ID',
+  `service_id` bigint NULL DEFAULT NULL COMMENT '服务ID（创建任务时为空）',
+  `service_name` varchar(120) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '服务名称',
+  `task_type` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'CREATE/UPDATE/DELETE/RESTART/STOP/ROLLBACK/SCALE',
+  `status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/SUCCESS/FAILED',
+  `command_log` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL COMMENT '执行的SSH命令与输出',
+  `error_msg` varchar(1000) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '失败原因',
+  `submitted_by` varchar(60) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '提交人',
+  `submitted_ip` varchar(60) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '提交人 IP 地址',
+  `created_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '提交时间',
+  `started_time` datetime NULL DEFAULT NULL COMMENT '开始执行时间',
+  `finished_time` datetime NULL DEFAULT NULL COMMENT '结束时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_env_created`(`environment_id`, `created_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '部署操作异步任务表' ROW_FORMAT = Dynamic;
+
 SET FOREIGN_KEY_CHECKS = 1;

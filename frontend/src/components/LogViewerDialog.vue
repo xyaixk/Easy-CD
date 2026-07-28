@@ -1,6 +1,9 @@
 <script setup>
-import { ref, watch, onUnmounted } from 'vue'
-import { getServiceLogsUrl } from '@/api/service'
+import { ref, watch, onUnmounted, nextTick } from 'vue'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
+import { getServiceLogsWsUrl } from '@/api/service'
 
 const props = defineProps({
   visible: {
@@ -19,96 +22,146 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible'])
 
-// 日志内容
-const logs = ref([])
+// 日志缓冲（解码后的原始文本块，用于下载和行数统计；渲染由 xterm 负责）
+let logChunks = []
+let bufferedChars = 0
+const MAX_BUFFER_CHARS = 5 * 1024 * 1024 // 缓冲上限 5M 字符，超出丢最旧块
+const lineCount = ref(0)
 const isLoading = ref(false)
 const isFollowing = ref(false)
 const autoScroll = ref(true)
 
-// SSE 连接
-let eventSource = null
-const logsContainer = ref(null)
+// WebSocket 连接（复用终端通道的 logs 模式，服务端推二进制字节流）
+let ws = null
+let decoder = null
+
+// xterm 终端（只读，仅用于日志渲染）
+const termRef = ref(null)
+let term = null
+let fitAddon = null
+let resizeObserver = null
+
+const initTerminal = () => {
+  if (term) return
+  term = new Terminal({
+    disableStdin: true,
+    cursorBlink: false,
+    fontSize: 13,
+    fontFamily: "'Consolas', 'Monaco', 'Courier New', monospace",
+    scrollback: 10000,
+    theme: {
+      background: '#1e1e1e',
+      foreground: '#d4d4d4',
+      cursor: '#1e1e1e',
+      selectionBackground: 'rgba(148, 163, 184, 0.3)'
+    }
+  })
+  fitAddon = new FitAddon()
+  term.loadAddon(fitAddon)
+  term.open(termRef.value)
+  fitAddon.fit()
+
+  // 容器尺寸变化自适应
+  resizeObserver = new ResizeObserver(() => {
+    if (!fitAddon) return
+    try { fitAddon.fit() } catch (_) {}
+  })
+  resizeObserver.observe(termRef.value)
+}
+
+const teardownTerminal = () => {
+  if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null }
+  if (term) { term.dispose(); term = null }
+  fitAddon = null
+}
+
+// 写入灰色状态提示（ANSI 暗色）
+const writeHint = (text) => {
+  if (!term) return
+  term.writeln(`\x1b[90m${text}\x1b[0m`)
+  if (autoScroll.value) term.scrollToBottom()
+}
 
 // 监听对话框显示状态
-watch(() => props.visible, (val) => {
+watch(() => props.visible, async (val) => {
   if (val) {
     document.body.style.overflow = 'hidden'
+    await nextTick()
+    initTerminal()
     loadLogs()
   } else {
     document.body.style.overflow = ''
     closeLogs()
+    teardownTerminal()
   }
 })
 
-// 加载日志
+// 加载日志（建立 WebSocket 连接）
 const loadLogs = () => {
-  logs.value = []
+  logChunks = []
+  bufferedChars = 0
+  lineCount.value = 0
+  if (term) term.reset()
   isLoading.value = true
+  decoder = new TextDecoder() // 每次连接新建，stream 模式处理跨帧多字节字符
   
   try {
-    // 直接使用 serviceId 获取服务聚合日志
-    const url = getServiceLogsUrl(props.serviceId, 500, isFollowing.value, props.replica?.id || null)
+    ws = new WebSocket(getServiceLogsWsUrl(props.serviceId, 500, isFollowing.value))
+    ws.binaryType = 'arraybuffer'
     
-    eventSource = new EventSource(url)
-    
-    eventSource.addEventListener('log', (event) => {
-      logs.value.push(event.data)
-      
-      // 限制最大行数，防止内存溢出（最多保留10000行）
-      const maxLines = 10000
-      if (logs.value.length > maxLines) {
-        logs.value = logs.value.slice(-maxLines)
-      }
-      
+    ws.onmessage = (event) => {
       isLoading.value = false
+      if (!term) return
       
-      // 自动滚动到底部
-      if (autoScroll.value) {
-        setTimeout(scrollToBottom, 50)
-      }
-    })
-    
-    eventSource.onerror = (error) => {
-      console.error('日志流错误:', error, '连接状态:', eventSource.readyState, '实时模式:', isFollowing.value)
-      isLoading.value = false
-      
-      // 静态模式下,连接关闭是正常的(日志读取完毕)
-      if (!isFollowing.value) {
-        // 静态模式:静默关闭连接,不显示任何提示
-        closeLogs()
-        return
-      }
-      
-      // 实时模式下的错误处理
-      if (eventSource.readyState === EventSource.CLOSED) {
-        logs.value.push('\n--- 日志流已关闭 ---')
-      } else if (eventSource.readyState === EventSource.CONNECTING) {
-        logs.value.push('\n--- 日志流重连中... ---')
-        return // 不关闭连接,等待自动重连
+      let text
+      if (typeof event.data === 'string') {
+        // 文本帧：服务端状态提示（已带 ANSI 样式）
+        text = event.data
+        term.write(text)
       } else {
-        logs.value.push('\n--- 日志流连接错误 ---')
+        // 二进制帧：命令原始输出字节流
+        term.write(new Uint8Array(event.data))
+        text = decoder.decode(event.data, { stream: true })
       }
-      closeLogs()
+      if (autoScroll.value) term.scrollToBottom()
+      
+      // 缓冲文本用于下载/行数统计，超出上限丢最旧块
+      logChunks.push(text)
+      bufferedChars += text.length
+      lineCount.value += (text.match(/\n/g) || []).length
+      while (bufferedChars > MAX_BUFFER_CHARS && logChunks.length > 1) {
+        bufferedChars -= logChunks.shift().length
+      }
+    }
+    
+    ws.onclose = () => {
+      // 服务端读完/断开会主动关连接；follow 模式的断开提示由服务端文本帧给出
+      isLoading.value = false
+      ws = null
+    }
+    
+    ws.onerror = (error) => {
+      console.error('日志流连接错误:', error)
+      isLoading.value = false
+      writeHint('--- 日志流连接错误 ---')
     }
     
   } catch (error) {
     console.error('加载日志失败:', error)
-    logs.value = ['加载日志失败: ' + error.message]
+    writeHint('加载日志失败: ' + error.message)
     isLoading.value = false
   }
 }
 
 // 滚动到底部
 const scrollToBottom = () => {
-  if (logsContainer.value) {
-    logsContainer.value.scrollTop = logsContainer.value.scrollHeight
-  }
+  if (term) term.scrollToBottom()
 }
 
 // 切换实时推送
 const toggleFollow = () => {
   if (isFollowing.value) {
-    // 从实时切换到静态:关闭SSE连接,保留当前日志
+    // 从实时切换到静态:关闭连接,保留当前日志
     closeLogs()
     isFollowing.value = false
   } else {
@@ -129,12 +182,17 @@ const toggleAutoScroll = () => {
 
 // 清空日志
 const clearLogs = () => {
-  logs.value = []
+  logChunks = []
+  bufferedChars = 0
+  lineCount.value = 0
+  if (term) term.reset()
 }
 
-// 下载日志
+// 下载日志（去除 ANSI 颜色控制码，统一换行符）
 const downloadLogs = () => {
-  const content = logs.value.join('\n')
+  const content = logChunks.join('')
+    .replace(/\x1b\[[0-9;]*m/g, '')
+    .replace(/\r\n/g, '\n')
   const blob = new Blob([content], { type: 'text/plain' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -149,9 +207,10 @@ const downloadLogs = () => {
 
 // 关闭日志流
 const closeLogs = () => {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
+  if (ws) {
+    ws.onclose = null
+    try { ws.close() } catch (_) {}
+    ws = null
   }
 }
 
@@ -162,6 +221,7 @@ const handleClose = () => {
 onUnmounted(() => {
   document.body.style.overflow = ''
   closeLogs()
+  teardownTerminal()
 })
 </script>
 
@@ -247,21 +307,18 @@ onUnmounted(() => {
             </button>
             
             <div class="toolbar-info">
-              <span>共 {{ logs.length }} 行</span>
+              <span>共 {{ lineCount }} 行</span>
             </div>
           </div>
           
           <div class="dialog-body">
-            <div v-if="isLoading" class="loading-state">
+            <div v-show="isLoading" class="loading-state">
               <div class="loading-spinner"></div>
               <p>正在加载日志...</p>
             </div>
             
-            <div v-else class="logs-container" ref="logsContainer">
-              <div v-if="logs.length === 0" class="empty-logs">
-                暂无日志内容
-              </div>
-              <pre v-else class="logs-content">{{ logs.join('\n') }}</pre>
+            <div class="terminal-body">
+              <div ref="termRef" class="terminal-container"></div>
             </div>
           </div>
         </div>
@@ -294,7 +351,7 @@ onUnmounted(() => {
 }
 
 .dialog-header {
-  padding: 1.5rem 2rem;
+  padding: 0.875rem 1.5rem;
   background: var(--primary-gradient);
   display: flex;
   align-items: center;
@@ -309,9 +366,9 @@ onUnmounted(() => {
 }
 
 .header-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.2);
   display: flex;
   align-items: center;
@@ -400,15 +457,19 @@ onUnmounted(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .loading-state {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 4rem;
-  color: var(--text-secondary);
+  background: rgba(30, 30, 30, 0.85);
+  color: #d4d4d4;
 }
 
 .loading-spinner {
@@ -425,45 +486,39 @@ onUnmounted(() => {
   to { transform: rotate(360deg); }
 }
 
-.logs-container {
+/* 终端区域：深色底，内边距和 xterm 背景一致 */
+.terminal-body {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
   background: #1e1e1e;
-  padding: 1.5rem;
+  padding: 0.75rem 1rem;
 }
 
-.logs-container::-webkit-scrollbar {
+.terminal-container {
+  width: 100%;
+  height: 100%;
+}
+
+/* xterm 自身滚动条深色化 */
+.terminal-container :deep(.xterm-viewport) {
+  overscroll-behavior: contain;
+}
+
+.terminal-container :deep(.xterm-viewport)::-webkit-scrollbar {
   width: 8px;
 }
 
-.logs-container::-webkit-scrollbar-track {
+.terminal-container :deep(.xterm-viewport)::-webkit-scrollbar-track {
   background: #2d2d2d;
 }
 
-.logs-container::-webkit-scrollbar-thumb {
+.terminal-container :deep(.xterm-viewport)::-webkit-scrollbar-thumb {
   background: #555;
   border-radius: 4px;
 }
 
-.logs-container::-webkit-scrollbar-thumb:hover {
+.terminal-container :deep(.xterm-viewport)::-webkit-scrollbar-thumb:hover {
   background: #666;
-}
-
-.empty-logs {
-  text-align: center;
-  padding: 4rem;
-  color: #888;
-  font-size: 0.875rem;
-}
-
-.logs-content {
-  margin: 0;
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  font-size: 0.875rem;
-  line-height: 1.6;
-  color: #d4d4d4;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 
 .dialog-footer {

@@ -7,16 +7,16 @@ import lombok.NoArgsConstructor;
 import java.util.List;
 
 /**
- * 日志查询分页结果。
+ * 日志游标查询结果。
  */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-public class LogPageVO {
+public class LogQueryResultVO {
 
-    /** 命中总数（Loki 无精确 total，这里返回当前查询窗口内的估算分页总数） */
-    private long total;
-
-    /** 当前页数据 */
+    /** 本批日志（时间倒序，最新在前） */
     private List<LogItemVO> items;
+
+    /** 是否还有更早的日志（本批取满 limit 即认为有） */
+    private boolean hasMore;
 }

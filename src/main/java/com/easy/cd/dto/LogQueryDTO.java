@@ -5,8 +5,7 @@ import lombok.Data;
 import java.util.List;
 
 /**
- * 日志查询请求参数。
- * 与前端 LogSearchDialog.vue 的字段一一对应。
+ * 日志查询请求参数（游标式，无 offset 分页）。
  */
 @Data
 public class LogQueryDTO {
@@ -47,9 +46,9 @@ public class LogQueryDTO {
     /** 自定义结束时间 */
     private String to;
 
-    /** 页码，从 1 开始 */
-    private Integer page = 1;
+    /** 单批条数，默认 500，上限 1000 */
+    private Integer limit = 500;
 
-    /** 每页条数；-1 表示全部（受 max-result-window 限制） */
-    private Integer size = 100;
+    /** 游标：只取早于该纳秒时间戳的日志（上一批最旧一条的 tsNanos），空表示首屏 */
+    private String beforeNanos;
 }

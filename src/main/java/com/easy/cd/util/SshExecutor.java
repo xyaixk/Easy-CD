@@ -1,5 +1,6 @@
 package com.easy.cd.util;
 
+import com.easy.cd.deploy.queue.TaskLogContext;
 import com.jcraft.jsch.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -191,13 +192,17 @@ public class SshExecutor {
                 log.debug("SSH命令退出码非零: exitCode={}, cmd={}, stderr={}", exitCode, command, stderr);
             }
 
-            return new SshResult(exitCode, stdout, stderr);
+            SshResult sshResult = new SshResult(exitCode, stdout, stderr);
+            appendTaskLog(host, command, sshResult);
+            return sshResult;
 
         } catch (Exception e) {
             log.warn("SSH命令执行失败: host={}, cmd={}, error={}", host.getKey(), command, e.getMessage());
             // 连接异常时移除缓存的 Session
             invalidateSession(host);
-            return new SshResult(-1, "", e.getMessage());
+            SshResult failResult = new SshResult(-1, "", e.getMessage());
+            appendTaskLog(host, command, failResult);
+            return failResult;
         } finally {
             if (channel != null && channel.isConnected()) {
                 channel.disconnect();
@@ -206,10 +211,34 @@ public class SshExecutor {
     }
 
     /**
+     * 异步任务日志捕获：任务线程内执行的命令追加到 TaskLogContext（未绑定时静默跳过）
+     */
+    private void appendTaskLog(SshHost host, String command, SshResult result) {
+        if (!TaskLogContext.active()) return;
+        StringBuilder block = new StringBuilder();
+        block.append("$ [").append(host != null ? host.getKey() : "?").append("] ").append(command).append('\n');
+        if (result.getStdout() != null && !result.getStdout().trim().isEmpty()) {
+            block.append(result.getStdout().trim()).append('\n');
+        }
+        if (result.getStderr() != null && !result.getStderr().trim().isEmpty()) {
+            block.append(result.getStderr().trim()).append('\n');
+        }
+        block.append("[exit ").append(result.getExitCode()).append("]\n");
+        TaskLogContext.append(block.toString());
+    }
+
+    /**
      * 带故障转移的命令执行（多 Manager 节点）
      * 随机选一个节点执行，失败则尝试下一个
      */
     public SshResult executeCommandWithFailover(List<SshHost> hosts, String command) {
+        return executeCommandWithFailover(hosts, command, DEFAULT_TIMEOUT);
+    }
+
+    /**
+     * 带故障转移的命令执行（指定超时，供部署类长耗时命令使用）
+     */
+    public SshResult executeCommandWithFailover(List<SshHost> hosts, String command, int timeoutMs) {
         if (hosts == null || hosts.isEmpty()) {
             return new SshResult(-1, "", "SSH 主机列表为空");
         }
@@ -220,7 +249,7 @@ public class SshExecutor {
         Exception lastException = null;
         for (SshHost host : shuffled) {
             try {
-                SshResult result = executeCommand(host, command);
+                SshResult result = executeCommand(host, command, timeoutMs);
                 // 命令本身执行失败（如 docker service 不存在）不算连接故障，直接返回
                 if (result.getExitCode() >= 0) {
                     return result;

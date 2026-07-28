@@ -15,29 +15,37 @@ const emit = defineEmits(['update:visible', 'confirm'])
 const BUILT_IN_KEYS = new Set([
   'replicas', 'cpus', 'memory', 'memory-reservation', 'cpu-reservation',
   'restart', 'restart-max-attempts', 'restart-delay',
-  'publish', 'network',
+  'publish', 'network', 'endpoint-mode',
   'healthcheck', 'healthcheck_interval', 'healthcheck_timeout',
   'healthcheck_retries', 'healthcheck_start_period',
   'update_parallelism', 'update_delay', 'update_monitor',
   'update_failure_action', 'update_order',
+  'rollback_parallelism', 'rollback_delay', 'rollback_monitor',
+  'rollback_failure_action', 'rollback_order',
   'container-label', 'container-labels', 'mounts',
-  'log-driver', 'log-opts', 'command'
+  'log-driver', 'log-opts', 'command', 'constraints',
+  'stop-grace-period', 'replicas-max-per-node'
 ])
 
 const emptyForm = () => ({
   serviceName: '', description: '', dockerImage: '',
   serviceMode: 'replicated', replicas: 1,
   // 结构化分区
-  network: '',
+  network: '', endpointMode: '',
   publishList: [],       // ['8080:8080', 'mode=host,target=X,published=Y']
   mountList: [],         // ['/host:/container', 'type=bind,src=X,dst=Y']
   envList: [],           // [{ key, value }]
-  cpus: '', memory: '', memoryReservation: '',
+  constraintList: [],    // ['node.role==manager', 'node.labels.zone==us-east']
+  cpus: '', memory: '', memoryReservation: '', cpuReservation: '',
+  replicasMaxPerNode: '',
   restart: '', restartMaxAttempts: '', restartDelay: '',
+  stopGracePeriod: '',
   healthcheck: '', healthcheckInterval: '', healthcheckTimeout: '',
   healthcheckRetries: '', healthcheckStartPeriod: '',
   updateParallelism: '', updateDelay: '', updateMonitor: '',
   updateFailureAction: '', updateOrder: '',
+  rollbackParallelism: '', rollbackDelay: '', rollbackMonitor: '',
+  rollbackFailureAction: '', rollbackOrder: '',
   logDriver: '', logOptsList: [], // [{ key, value }]
   labelList: [],         // ['prometheus.scrape=true']
   command: ''
@@ -47,8 +55,8 @@ const formData = ref(emptyForm())
 
 // 分组折叠状态
 const sections = reactive({
-  env: true, network: true, mount: true, resource: false,
-  restart: false, health: false, update: false, logAndLabel: false, command: false
+  env: true, network: true, mount: true, constraint: false, resource: false,
+  restart: false, health: false, update: false, rollback: false, logAndLabel: false, command: false
 })
 
 // 导入 Docker 命令弹窗
@@ -90,15 +98,20 @@ const loadServiceData = () => {
 /** dockerParams map → 结构化 formData */
 const mapToForm = (map, form) => {
   form.network = strOr(map.network, '')
+  form.endpointMode = strOr(map['endpoint-mode'], '')
   form.publishList = splitMulti(map.publish)
   form.mountList = splitMulti(map.mounts)
   form.labelList = splitMulti(map['container-labels'] ?? map['container-label'])
+  form.constraintList = splitMulti(map.constraints)
   form.cpus = strOr(map.cpus, '')
   form.memory = strOr(map.memory, '')
   form.memoryReservation = strOr(map['memory-reservation'], '')
+  form.cpuReservation = strOr(map['cpu-reservation'], '')
+  form.replicasMaxPerNode = strOr(map['replicas-max-per-node'], '')
   form.restart = strOr(map.restart, '')
   form.restartMaxAttempts = strOr(map['restart-max-attempts'], '')
   form.restartDelay = strOr(map['restart-delay'], '')
+  form.stopGracePeriod = strOr(map['stop-grace-period'], '')
   form.healthcheck = strOr(map.healthcheck, '')
   form.healthcheckInterval = strOr(map.healthcheck_interval, '')
   form.healthcheckTimeout = strOr(map.healthcheck_timeout, '')
@@ -109,6 +122,11 @@ const mapToForm = (map, form) => {
   form.updateMonitor = strOr(map.update_monitor, '')
   form.updateFailureAction = strOr(map.update_failure_action, '')
   form.updateOrder = strOr(map.update_order, '')
+  form.rollbackParallelism = strOr(map.rollback_parallelism, '')
+  form.rollbackDelay = strOr(map.rollback_delay, '')
+  form.rollbackMonitor = strOr(map.rollback_monitor, '')
+  form.rollbackFailureAction = strOr(map.rollback_failure_action, '')
+  form.rollbackOrder = strOr(map.rollback_order, '')
   form.logDriver = strOr(map['log-driver'], '')
   form.command = strOr(map.command, '')
 
@@ -139,18 +157,24 @@ const formToMap = () => {
   const map = {}
   const f = formData.value
   if (f.network) map.network = f.network
+  if (f.endpointMode) map['endpoint-mode'] = f.endpointMode
   const pub = f.publishList.map(s => (s || '').trim()).filter(Boolean)
   if (pub.length) map.publish = pub.join('\n')
   const mnt = f.mountList.map(s => (s || '').trim()).filter(Boolean)
   if (mnt.length) map.mounts = mnt.join('\n')
   const lbl = f.labelList.map(s => (s || '').trim()).filter(Boolean)
   if (lbl.length) map['container-labels'] = lbl.join('\n')
+  const cst = f.constraintList.map(s => (s || '').trim()).filter(Boolean)
+  if (cst.length) map.constraints = cst.join('\n')
   if (f.cpus) map.cpus = f.cpus
   if (f.memory) map.memory = f.memory
   if (f.memoryReservation) map['memory-reservation'] = f.memoryReservation
+  if (f.cpuReservation) map['cpu-reservation'] = f.cpuReservation
+  if (f.replicasMaxPerNode) map['replicas-max-per-node'] = f.replicasMaxPerNode
   if (f.restart) map.restart = f.restart
   if (f.restartMaxAttempts) map['restart-max-attempts'] = f.restartMaxAttempts
   if (f.restartDelay) map['restart-delay'] = f.restartDelay
+  if (f.stopGracePeriod) map['stop-grace-period'] = f.stopGracePeriod
   if (f.healthcheck) map.healthcheck = f.healthcheck
   if (f.healthcheckInterval) map.healthcheck_interval = f.healthcheckInterval
   if (f.healthcheckTimeout) map.healthcheck_timeout = f.healthcheckTimeout
@@ -161,6 +185,11 @@ const formToMap = () => {
   if (f.updateMonitor) map.update_monitor = f.updateMonitor
   if (f.updateFailureAction) map.update_failure_action = f.updateFailureAction
   if (f.updateOrder) map.update_order = f.updateOrder
+  if (f.rollbackParallelism) map.rollback_parallelism = f.rollbackParallelism
+  if (f.rollbackDelay) map.rollback_delay = f.rollbackDelay
+  if (f.rollbackMonitor) map.rollback_monitor = f.rollbackMonitor
+  if (f.rollbackFailureAction) map.rollback_failure_action = f.rollbackFailureAction
+  if (f.rollbackOrder) map.rollback_order = f.rollbackOrder
   if (f.logDriver) map['log-driver'] = f.logDriver
   if (f.logOptsList && f.logOptsList.length) {
     const obj = {}
@@ -245,10 +274,12 @@ const doImport = () => {
     sections.env = form.envList.length > 0 || sections.env
     sections.network = form.network || form.publishList.length > 0 || sections.network
     sections.mount = form.mountList.length > 0 || sections.mount
-    sections.resource = !!(form.cpus || form.memory || form.memoryReservation) || sections.resource
-    sections.restart = !!(form.restart || form.restartMaxAttempts) || sections.restart
+    sections.constraint = form.constraintList.length > 0 || sections.constraint
+    sections.resource = !!(form.cpus || form.memory || form.memoryReservation || form.cpuReservation || form.replicasMaxPerNode) || sections.resource
+    sections.restart = !!(form.restart || form.restartMaxAttempts || form.stopGracePeriod) || sections.restart
     sections.health = !!form.healthcheck || sections.health
     sections.update = !!(form.updateParallelism || form.updateDelay) || sections.update
+    sections.rollback = !!(form.rollbackParallelism || form.rollbackDelay) || sections.rollback
     sections.logAndLabel = !!(form.logDriver || form.logOptsList.length || form.labelList.length) || sections.logAndLabel
     sections.command = !!form.command || sections.command
     showImportDialog.value = false
@@ -372,9 +403,19 @@ onUnmounted(() => { document.body.style.overflow = '' })
                 </span>
               </div>
               <div class="section-body" v-show="sections.network">
-                <div class="form-group">
-                  <label class="sub-label">网络 (network)</label>
-                  <input v-model="formData.network" type="text" placeholder="overlay / host / release-overlay" class="form-input" />
+                <div class="form-row-2">
+                  <div class="form-group">
+                    <label class="sub-label">网络 (network)</label>
+                    <input v-model="formData.network" type="text" placeholder="overlay / host / release-overlay" class="form-input" />
+                  </div>
+                  <div class="form-group">
+                    <label class="sub-label">端点模式 (endpoint-mode)</label>
+                    <select v-model="formData.endpointMode" class="form-input">
+                      <option value="">默认 (vip)</option>
+                      <option value="vip">vip</option>
+                      <option value="dnsrr">dnsrr</option>
+                    </select>
+                  </div>
                 </div>
                 <div class="form-group">
                   <div class="label-with-button">
@@ -411,6 +452,26 @@ onUnmounted(() => { document.body.style.overflow = '' })
               </div>
             </div>
 
+            <!-- 分组：节点约束 -->
+            <div class="section" :class="{ open: sections.constraint }">
+              <div class="section-header" @click="sections.constraint = !sections.constraint">
+                <span class="section-title">
+                  <span class="section-chevron">›</span>
+                  节点约束
+                  <span class="section-count" v-if="formData.constraintList.length">{{ formData.constraintList.length }}</span>
+                </span>
+                <button type="button" class="btn-add-mini" @click.stop="addItem(formData.constraintList, '')">+ 添加</button>
+              </div>
+              <div class="section-body" v-show="sections.constraint">
+                <div v-if="!formData.constraintList.length" class="empty-tip">暂无节点约束，点击右上角 "+ 添加"</div>
+                <div v-for="(_, idx) in formData.constraintList" :key="idx" class="list-row">
+                  <input v-model="formData.constraintList[idx]" placeholder="node.role==manager 或 node.labels.zone==us-east" class="form-input" />
+                  <button type="button" class="btn-del" @click="removeItem(formData.constraintList, idx)">×</button>
+                </div>
+                <div class="form-hint">常用：<code>node.role==manager</code>、<code>node.role==worker</code>、<code>node.labels.KEY==VALUE</code>、<code>node.hostname==NAME</code></div>
+              </div>
+            </div>
+
             <!-- 分组：资源限制 -->
             <div class="section" :class="{ open: sections.resource }">
               <div class="section-header" @click="sections.resource = !sections.resource">
@@ -418,9 +479,14 @@ onUnmounted(() => { document.body.style.overflow = '' })
               </div>
               <div class="section-body" v-show="sections.resource">
                 <div class="form-row-3">
-                  <div><label class="sub-label">CPU (cpus)</label><input v-model="formData.cpus" type="text" placeholder="2.0" class="form-input" /></div>
-                  <div><label class="sub-label">内存 (memory)</label><input v-model="formData.memory" type="text" placeholder="4G" class="form-input" /></div>
-                  <div><label class="sub-label">内存预留</label><input v-model="formData.memoryReservation" type="text" placeholder="2G" class="form-input" /></div>
+                  <div><label class="sub-label">CPU 限制 (limit-cpu)</label><input v-model="formData.cpus" type="text" placeholder="2.0" class="form-input" /></div>
+                  <div><label class="sub-label">内存限制 (limit-memory)</label><input v-model="formData.memory" type="text" placeholder="4G" class="form-input" /></div>
+                  <div><label class="sub-label">内存预留 (reserve-memory)</label><input v-model="formData.memoryReservation" type="text" placeholder="2G" class="form-input" /></div>
+                </div>
+                <div class="form-row-3">
+                  <div><label class="sub-label">CPU 预留 (reserve-cpu)</label><input v-model="formData.cpuReservation" type="text" placeholder="0.25" class="form-input" /></div>
+                  <div><label class="sub-label">每节点最大副本</label><input v-model="formData.replicasMaxPerNode" type="text" placeholder="1" class="form-input" /></div>
+                  <div></div>
                 </div>
               </div>
             </div>
@@ -443,6 +509,11 @@ onUnmounted(() => { document.body.style.overflow = '' })
                   </div>
                   <div><label class="sub-label">最大次数</label><input v-model="formData.restartMaxAttempts" type="text" placeholder="0 表示无限" class="form-input" /></div>
                   <div><label class="sub-label">延迟</label><input v-model="formData.restartDelay" type="text" placeholder="5s" class="form-input" /></div>
+                </div>
+                <div class="form-row-3">
+                  <div><label class="sub-label">停止优雅期 (stop-grace-period)</label><input v-model="formData.stopGracePeriod" type="text" placeholder="10s" class="form-input" /></div>
+                  <div></div>
+                  <div></div>
                 </div>
               </div>
             </div>
@@ -490,6 +561,38 @@ onUnmounted(() => { document.body.style.overflow = '' })
                   <div>
                     <label class="sub-label">order</label>
                     <select v-model="formData.updateOrder" class="form-input">
+                      <option value="">默认</option>
+                      <option value="start-first">start-first</option>
+                      <option value="stop-first">stop-first</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 分组：回滚策略 -->
+            <div class="section" :class="{ open: sections.rollback }">
+              <div class="section-header" @click="sections.rollback = !sections.rollback">
+                <span class="section-title"><span class="section-chevron">›</span>回滚策略</span>
+              </div>
+              <div class="section-body" v-show="sections.rollback">
+                <div class="form-row-3">
+                  <div><label class="sub-label">parallelism</label><input v-model="formData.rollbackParallelism" type="text" placeholder="1" class="form-input" /></div>
+                  <div><label class="sub-label">delay</label><input v-model="formData.rollbackDelay" type="text" placeholder="10s" class="form-input" /></div>
+                  <div><label class="sub-label">monitor</label><input v-model="formData.rollbackMonitor" type="text" placeholder="30s" class="form-input" /></div>
+                </div>
+                <div class="form-row-2">
+                  <div>
+                    <label class="sub-label">failure_action</label>
+                    <select v-model="formData.rollbackFailureAction" class="form-input">
+                      <option value="">默认</option>
+                      <option value="pause">pause</option>
+                      <option value="continue">continue</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="sub-label">order</label>
+                    <select v-model="formData.rollbackOrder" class="form-input">
                       <option value="">默认</option>
                       <option value="start-first">start-first</option>
                       <option value="stop-first">stop-first</option>
@@ -604,7 +707,7 @@ onUnmounted(() => { document.body.style.overflow = '' })
 }
 
 .dialog-header {
-  padding: 1.25rem 1.75rem;
+  padding: 0.875rem 1.5rem;
   background: var(--primary-gradient);
   color: white;
   display: flex; justify-content: space-between; align-items: center;
@@ -615,7 +718,7 @@ onUnmounted(() => { document.body.style.overflow = '' })
 .header-content { display: flex; align-items: center; gap: 0.85rem; }
 
 .header-icon {
-  width: 40px; height: 40px; border-radius: 10px;
+  width: 32px; height: 32px; border-radius: 8px;
   background: rgba(255, 255, 255, 0.2);
   display: flex; align-items: center; justify-content: center;
   backdrop-filter: blur(10px);

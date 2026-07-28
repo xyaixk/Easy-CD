@@ -4,7 +4,6 @@ import com.easy.cd.dto.ImageVersionDTO;
 import com.easy.cd.dto.ServiceCreateDTO;
 import com.easy.cd.dto.ServiceUpdateDTO;
 import com.easy.cd.vo.ServiceDetailVO;
-import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -14,14 +13,14 @@ import java.util.List;
 public interface ServiceManagementService {
     
     /**
-     * 创建服务
+     * 创建服务（异步：提交到环境队列后立即返回任务ID）
      */
-    ServiceDetailVO create(ServiceCreateDTO createDTO);
+    Long create(ServiceCreateDTO createDTO);
     
     /**
-     * 更新服务
+     * 更新服务（异步：返回任务ID）
      */
-    ServiceDetailVO update(Long id, ServiceUpdateDTO updateDTO);
+    Long update(Long id, ServiceUpdateDTO updateDTO);
     
     /**
      * 查询环境下的所有服务
@@ -34,29 +33,29 @@ public interface ServiceManagementService {
     ServiceDetailVO getById(Long id);
     
     /**
-     * 删除服务（包括 Docker 服务和数据库记录）
+     * 删除服务（异步：返回任务ID，包括 Docker 服务和数据库记录）
      */
-    void delete(Long id);
+    Long delete(Long id);
     
     /**
-     * 重启服务
+     * 重启服务（异步：返回任务ID）
      */
-    void restart(Long id);
+    Long restart(Long id);
     
     /**
-     * 停止服务
+     * 停止服务（异步：返回任务ID）
      */
-    void stop(Long id);
+    Long stop(Long id);
     
     /**
-     * 回滚服务
+     * 回滚服务（异步：返回任务ID）
      */
-    void rollback(Long id, String targetVersion);
+    Long rollback(Long id, String targetVersion);
     
     /**
-     * 调整副本数
+     * 调整副本数（异步：返回任务ID）
      */
-    void scale(Long id, Integer replicas);
+    Long scale(Long id, Integer replicas);
     
     /**
      * 查看服务副本列表
@@ -67,14 +66,4 @@ public interface ServiceManagementService {
      * 获取服务镜像的所有可用版本（从镜像仓库）
      */
     List<ImageVersionDTO> getAvailableVersions(Long serviceId);
-    
-    /**
-     * 流式推送副本日志（SSE）
-     * @param serviceId 服务ID
-     * @param replicaId 副本ID（容器ID）
-     * @param tail 获取最后N行
-     * @param follow 是否持续推送
-     * @return SseEmitter
-     */
-    SseEmitter streamLogs(Long serviceId, String replicaId, Integer tail, Boolean follow);
 }
