@@ -57,6 +57,17 @@ export function fetchLogServices(envId) {
 }
 
 /**
+ * 当前环境 Loki 中指定标签的候选值（label: service_name / container_name / image_name）
+ */
+export function fetchLogLabelValues(envId, label) {
+  return request({
+    url: '/observability/logs/label-values',
+    method: 'get',
+    params: { envId, label }
+  })
+}
+
+/**
  * 导出日志（POST + Blob，携带 token）
  */
 export async function exportLogs(body, filename) {
@@ -89,6 +100,7 @@ export function getLogsTailWsUrl(filters) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const params = new URLSearchParams({ envId: String(filters.envId) })
   if (filters.services?.length) params.set('services', filters.services.join(','))
+  if (filters.images?.length) params.set('images', filters.images.join(','))
   if (filters.levels?.length) params.set('levels', filters.levels.join(','))
   if (filters.keyword) params.set('keyword', filters.keyword)
   if (filters.traceId) params.set('traceId', filters.traceId)

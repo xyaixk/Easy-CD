@@ -79,6 +79,15 @@ public class ObservabilityController {
     }
 
     /**
+     * 实时读取指定环境 Loki 的标签候选值（白名单：service_name/container_name/image_name）。
+     */
+    @GetMapping("/label-values")
+    public Result<List<String>> listLabelValues(@RequestParam("envId") Long envId,
+                                                 @RequestParam("label") String label) {
+        return Result.success(observabilityService.listLabelValues(envId, label));
+    }
+
+    /**
      * 按筛选条件导出日志（受 max-result-window 限制）。
      */
     @PostMapping("/export")

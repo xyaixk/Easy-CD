@@ -138,7 +138,7 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
             String cmd = "docker exec -it " + containerId
                     + " /bin/sh -c '[ -x /bin/bash ] && exec /bin/bash || exec /bin/sh'";
             openCommandChannel(session, target, cmd,
-                    "shell:" + replica.getReplicaName(), "\r\n\u001b[90m[会话已结束]\u001b[0m\r\n");
+                    "shell:" + replica.getReplicaName(), "\r\n\u001b[90m[会话已结束]\u001b[0m\r\n", null);
         } catch (NumberFormatException e) {
             closeWith(session, "参数错误");
         } catch (Exception e) {
@@ -171,18 +171,25 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
         int effectiveTail = tail > 0 ? Math.min(tail, 1000) : 500;
         boolean follow = Boolean.parseBoolean(params.getOrDefault("follow", "false"));
 
+        // 2>&1：docker service logs 会把容器 stderr 流的日志写到自己的 stderr，
+        // 合并到 stdout 后单条通道即可拿全（否则只能看到 stdout 流的那一半）
         String cmd = "docker service logs " + serviceName
                 + " --tail " + effectiveTail
-                + " --since 10m --no-trunc"
-                + (follow ? " --follow" : "");
+                + " --no-trunc"
+                + (follow ? " --follow" : "")
+                + " 2>&1";
 
         // 静态模式读完即止，静默关闭；follow 模式断开时给提示
         String endMessage = follow ? "\r\n\u001b[90m[日志流已断开]\u001b[0m\r\n" : null;
+        // 零输出时给出明确提示，避免前端空白无从判断
+        String emptyHint = "\u001b[90m[服务 " + serviceName + " 最近 " + effectiveTail
+                + " 行内没有日志输出]\u001b[0m\r\n";
 
         Exception lastError = null;
         for (SshHost host : hosts) {
             try {
-                ShellContext ctx = openCommandChannel(session, host, cmd, "logs:" + serviceName, endMessage);
+                ShellContext ctx = openCommandChannel(session, host, cmd, "logs:" + serviceName,
+                        endMessage, emptyHint);
                 ctx.readOnly = true;
                 return;
             } catch (Exception e) {
@@ -219,9 +226,10 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
      * PTY 的附带好处：连接断开时远端进程收到 SIGHUP 自动退出，不留孤儿 docker logs --follow
      *
      * @param endMessage 命令结束时发给前端的提示，null 表示静默关闭
+     * @param emptyHint  命令全程零输出时发给前端的提示，null 表示不提示
      */
     private ShellContext openCommandChannel(WebSocketSession session, SshHost host, String command,
-                                    String tag, String endMessage) throws Exception {
+                                    String tag, String endMessage, String emptyHint) throws Exception {
         JSch jsch = new JSch();
         if (host.getPrivateKey() != null && !host.getPrivateKey().isEmpty()) {
             jsch.addIdentity(host.getKey(), host.getPrivateKey().getBytes(StandardCharsets.UTF_8), null, null);
@@ -252,22 +260,31 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
         ctx.stdin = stdin;
         contexts.put(session.getId(), ctx);
 
-        log.info("通道已打开: tag={}, node={}", tag, host.getKey());
+        log.info("通道已打开: tag={}, node={}, cmd={}", tag, host.getKey(), command);
 
         // 输出泵：命令输出 -> WebSocket 二进制帧
         ctx.pumpThread = new Thread(() -> {
             byte[] buf = new byte[8192];
+            long total = 0;
             try {
                 int n;
                 while (!ctx.closed && (n = out.read(buf)) != -1) {
+                    total += n;
                     session.sendMessage(new BinaryMessage(java.util.Arrays.copyOf(buf, n)));
                 }
             } catch (Exception e) {
                 if (!ctx.closed) log.debug("输出泵结束: tag={}, {}", tag, e.getMessage());
             } finally {
+                // 零输出多半是命令本身失败或没有匹配数据，记下退出码便于排查
+                if (total == 0 && !ctx.closed) {
+                    log.info("命令无输出: tag={}, exitStatus={}", tag, channel.getExitStatus());
+                }
                 // 命令退出时主动关闭 WebSocket
                 try {
                     if (session.isOpen()) {
+                        if (total == 0 && !ctx.closed && emptyHint != null) {
+                            session.sendMessage(new TextMessage(emptyHint));
+                        }
                         if (endMessage != null) {
                             session.sendMessage(new TextMessage(endMessage));
                         }

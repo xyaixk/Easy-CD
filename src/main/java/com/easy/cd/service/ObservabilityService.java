@@ -41,6 +41,11 @@ public interface ObservabilityService {
     List<String> listServices(Long envId);
 
     /**
+     * 实时读取指定环境 Loki 的指定标签候选值（白名单：service_name/container_name/image_name）。
+     */
+    List<String> listLabelValues(Long envId, String label);
+
+    /**
      * 按筛选条件导出日志文本，受 max-result-window 限制。
      */
     void exportLogsCsv(LogQueryDTO query, HttpServletResponse response);

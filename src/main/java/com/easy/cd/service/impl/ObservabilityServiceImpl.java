@@ -34,10 +34,12 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -68,6 +70,8 @@ public class ObservabilityServiceImpl implements ObservabilityService {
 
     private static final DateTimeFormatter FMT_MINUTE = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
     private static final DateTimeFormatter FMT_SECOND = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    /** 允许通过 label-values 端点查询候选值的标签白名单 */
+    private static final Set<String> ALLOWED_LABELS = new HashSet<>(Arrays.asList("service_name", "container_name", "image_name"));
     private static final Pattern SPRING_LOG_PATTERN = Pattern.compile(
             "^(?<time>\\S+)\\s+(?<level>TRACE|DEBUG|INFO|WARN|ERROR)\\s+\\d+\\s+---\\s+\\[[^]]*]\\s+\\[(?<thread>[^]]*)]\\s+(?:\\[(?<trace>[^]-]+)(?:-[^]]*)?]\\s+)?(?<logger>\\S+)\\s*:\\s*(?<msg>.*)$");
 
@@ -218,7 +222,7 @@ public class ObservabilityServiceImpl implements ObservabilityService {
         if (StringUtils.isNotBlank(config.namespace)) {
             selector.append(", namespace=").append(quoteLabel(config.namespace));
         }
-        selector.append(", container=").append(quoteLabel(container.trim())).append('}');
+        selector.append(", container_name=").append(quoteLabel(container.trim())).append('}');
         String logql = selector.toString();
 
         // 锚点之前 n 行：[anchor-1h, anchor) backward 后反转为正序
@@ -259,7 +263,7 @@ public class ObservabilityServiceImpl implements ObservabilityService {
             fromTime = toTime.minusMinutes(30);
         }
 
-        String logql = buildEnvironmentSelector(config) + " |= " + quoteString(traceId.trim());
+        String logql = buildEnvironmentSelector(config) + " |~ " + quoteString("(?i)" + regexpQuote(traceId.trim()));
         return executeLokiQuery(config.uri, logql, toNanos(fromTime), toNanos(toTime), MAX_BATCH_LIMIT, "forward");
     }
 
@@ -267,13 +271,22 @@ public class ObservabilityServiceImpl implements ObservabilityService {
 
     @Override
     public List<String> listServices(Long envId) {
+        return listLabelValues(envId, "service_name");
+    }
+
+    @Override
+    public List<String> listLabelValues(Long envId, String label) {
+        String target = label == null ? "" : label.trim();
+        if (!ALLOWED_LABELS.contains(target)) {
+            throw new BusinessException("不支持的标签: " + label);
+        }
         LokiEnvironmentConfig config = resolveLokiEnvironmentConfig(envId);
-        URI uri = UriComponentsBuilder.fromHttpUrl(config.uri + "/loki/api/v1/label/service/values")
+        URI uri = UriComponentsBuilder.fromHttpUrl(config.uri + "/loki/api/v1/label/" + target + "/values")
                 .queryParam("query", buildEnvironmentSelector(config))
                 .build()
                 .encode(StandardCharsets.UTF_8)
                 .toUri();
-        return executeLokiStringList(uri, "服务标签");
+        return executeLokiStringList(uri, target + " 标签");
     }
 
     @Override
@@ -488,10 +501,13 @@ public class ObservabilityServiceImpl implements ObservabilityService {
             selector.append(", namespace=").append(quoteLabel(namespace));
         }
         if (!CollectionUtils.isEmpty(q.getServices())) {
-            selector.append(", service=~").append(quoteLabel(joinRegex(q.getServices(), false)));
+            selector.append(", service_name=~").append(quoteLabel(joinRegex(q.getServices(), false)));
+        }
+        if (!CollectionUtils.isEmpty(q.getImages())) {
+            selector.append(", image_name=~").append(quoteLabel(joinRegex(q.getImages(), false)));
         }
         if (StringUtils.isNotBlank(q.getContainerName())) {
-            selector.append(", container=~").append(quoteLabel(".*" + regexpQuote(q.getContainerName().trim()) + ".*"));
+            selector.append(", container_name=~").append(quoteLabel(".*" + regexpQuote(q.getContainerName().trim()) + ".*"));
         }
         selector.append('}');
 
@@ -503,19 +519,35 @@ public class ObservabilityServiceImpl implements ObservabilityService {
         return selector.toString();
     }
 
+    /** 级别过滤：基于 Loki structured metadata 的 detected_level，与直方图口径一致，对非 Spring 格式行同样生效 */
     private void appendLevelFilter(StringBuilder sb, List<String> levels) {
         if (CollectionUtils.isEmpty(levels)) {
             return;
         }
-        String regex = joinRegex(levels, true);
-        if (StringUtils.isNotBlank(regex) && !".*".equals(regex)) {
-            sb.append(" |~ ").append(quoteString("(?i)\\b(" + regex + ")\\b"));
+        Set<String> vals = new LinkedHashSet<>();
+        for (String lv : levels) {
+            if (StringUtils.isBlank(lv)) {
+                continue;
+            }
+            switch (lv.trim().toUpperCase(Locale.ROOT)) {
+                case "ERROR": vals.add("error"); break;
+                case "WARN": vals.add("warn"); vals.add("warning"); break;
+                case "INFO": vals.add("info"); break;
+                case "DEBUG": vals.add("debug"); vals.add("trace"); break;
+                default: break;
+            }
         }
+        // 四个级别全选时不加过滤，避免漏掉 unknown 级别的行
+        if (vals.isEmpty() || vals.size() >= 6) {
+            return;
+        }
+        sb.append(" | detected_level=~").append(quoteString(String.join("|", vals)));
     }
 
+    /** 行内容过滤：大小写不敏感的子串包含 */
     private void appendLineFilter(StringBuilder sb, String value) {
         if (StringUtils.isNotBlank(value)) {
-            sb.append(" |= ").append(quoteString(value.trim()));
+            sb.append(" |~ ").append(quoteString("(?i)" + regexpQuote(value.trim())));
         }
     }
 
@@ -670,8 +702,9 @@ public class ObservabilityServiceImpl implements ObservabilityService {
         vo.setTsNanos(nanos);
         vo.setMessage(line);
         if (stream != null) {
-            vo.setService(stream.getString("service"));
-            vo.setContainerName(stream.getString("container"));
+            vo.setService(firstNonBlank(stream.getString("service_name"), stream.getString("service")));
+            vo.setContainerName(firstNonBlank(stream.getString("container_name"), stream.getString("container")));
+            vo.setImageName(stream.getString("image_name"));
             vo.setLevel(normalizeLevel(stream.getString("detected_level")));
             vo.setSourceHost(stream.getString("host"));
             vo.setTraceId(stream.getString("trace_id"));

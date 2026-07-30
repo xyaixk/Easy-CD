@@ -86,6 +86,7 @@ public class LogTailWebSocketHandler extends TextWebSocketHandler {
         LogQueryDTO query = new LogQueryDTO();
         query.setEnvId(envId);
         query.setServices(splitParam(params.get("services")));
+        query.setImages(splitParam(params.get("images")));
         query.setLevels(splitParam(params.get("levels")));
         query.setKeyword(params.get("keyword"));
         query.setTraceId(params.get("traceId"));

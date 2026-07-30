@@ -19,6 +19,9 @@ public class LogQueryDTO {
     /** 服务列表（Loki service_name 标签），多选 */
     private List<String> services;
 
+    /** 镜像列表（Loki image_name 标签），多选 */
+    private List<String> images;
+
     /** 级别列表（Loki detected_level 标签），多选，如 INFO/WARN/ERROR/DEBUG */
     private List<String> levels;
 
