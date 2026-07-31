@@ -1,5 +1,7 @@
 <script setup>
 import { ref, watch, onUnmounted, computed, reactive } from 'vue'
+import EnvClipboardActions from './EnvClipboardActions.vue'
+import { DOCKER_BUILT_IN_KEYS as BUILT_IN_KEYS } from '../utils/envClipboard.js'
 import { parseDockerCommand } from '../utils/dockerCommand.js'
 import toast from '../utils/toast.js'
 
@@ -10,22 +12,6 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:visible', 'confirm'])
-
-// 内置 key 名单（保持与后端 isDockerBuiltInParam 一致）
-const BUILT_IN_KEYS = new Set([
-  'replicas', 'cpus', 'memory', 'memory-reservation', 'cpu-reservation',
-  'restart', 'restart-max-attempts', 'restart-delay',
-  'publish', 'network', 'endpoint-mode',
-  'healthcheck', 'healthcheck_interval', 'healthcheck_timeout',
-  'healthcheck_retries', 'healthcheck_start_period',
-  'update_parallelism', 'update_delay', 'update_monitor',
-  'update_failure_action', 'update_order',
-  'rollback_parallelism', 'rollback_delay', 'rollback_monitor',
-  'rollback_failure_action', 'rollback_order',
-  'container-label', 'container-labels', 'mounts',
-  'log-driver', 'log-opts', 'command', 'constraints',
-  'stop-grace-period', 'replicas-max-per-node'
-])
 
 const emptyForm = () => ({
   serviceName: '', description: '', dockerImage: '',
@@ -380,7 +366,13 @@ onUnmounted(() => { document.body.style.overflow = '' })
                   环境变量
                   <span class="section-count" v-if="formData.envList.length">{{ formData.envList.length }}</span>
                 </span>
-                <button type="button" class="btn-add-mini" @click.stop="addItem(formData.envList, { key: '', value: '' })">+ 添加</button>
+                <div class="section-actions" @click.stop>
+                  <EnvClipboardActions
+                    :env-list="formData.envList"
+                    @apply="formData.envList = $event"
+                  />
+                  <button type="button" class="btn-add-mini" @click="addItem(formData.envList, { key: '', value: '' })">+ 添加</button>
+                </div>
               </div>
               <div class="section-body" v-show="sections.env">
                 <div v-if="!formData.envList.length" class="empty-tip">暂无环境变量，点击右上角 "+ 添加"</div>
@@ -852,6 +844,7 @@ select.form-input { cursor: pointer; }
   text-align: center;
 }
 .section-body { padding: 0.9rem 1rem; background: white; }
+.section-actions { display: flex; align-items: center; gap: 0.35rem; }
 
 /* 添加/删除按钮 */
 .btn-add-mini {
