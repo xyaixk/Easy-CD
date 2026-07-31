@@ -49,7 +49,7 @@ const submit = () => {
 
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="group-dialog-mask" @click.self="close">
+    <div v-if="visible" class="group-dialog-mask">
       <form class="group-dialog" @submit.prevent="submit">
         <header class="group-dialog-header">
           <h3>{{ mode === 'edit' ? '重命名分组' : '新建分组' }}</h3>

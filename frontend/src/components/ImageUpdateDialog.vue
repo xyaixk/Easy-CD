@@ -113,7 +113,6 @@ onUnmounted(endHold)
       <div
         v-if="visible"
         class="dialog-overlay"
-        @click.self="handleCancel"
       >
         <div class="image-update-dialog" role="dialog" aria-modal="true" aria-labelledby="image-update-title">
           <div class="dialog-header">

@@ -45,7 +45,7 @@ const displayValue = value => value === '' ? '（空字符串）' : value
 <template>
   <Teleport to="body">
     <Transition name="env-conflict-dialog">
-      <div v-if="visible" class="env-conflict-overlay" @click.self="close">
+      <div v-if="visible" class="env-conflict-overlay">
         <div class="env-conflict-dialog" role="dialog" aria-modal="true" aria-labelledby="env-conflict-title">
           <div class="env-conflict-header">
             <div>

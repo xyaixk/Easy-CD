@@ -154,12 +154,6 @@ const handleCancel = () => {
   emit('update:visible', false)
   selectedVersion.value = ''
 }
-
-const handleClickOutside = (e) => {
-  if (e.target.classList.contains('confirm-dialog-overlay')) {
-    handleCancel()
-  }
-}
 </script>
 
 <template>
@@ -168,7 +162,6 @@ const handleClickOutside = (e) => {
       <div 
         v-if="visible" 
         class="confirm-dialog-overlay"
-        @click="handleClickOutside"
       >
         <div class="confirm-dialog">
           <div class="dialog-header">

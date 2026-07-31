@@ -70,12 +70,6 @@ const handleCancel = () => {
   emit('update:visible', false)
 }
 
-const handleClickOutside = (e) => {
-  if (e.target.classList.contains('confirm-dialog-overlay')) {
-    handleCancel()
-  }
-}
-
 const isValid = computed(() => {
   return targetReplicas.value > 0 && targetReplicas.value <= 100
 })
@@ -111,7 +105,6 @@ const validateInput = (e) => {
       <div 
         v-if="visible" 
         class="confirm-dialog-overlay"
-        @click="handleClickOutside"
       >
         <div class="confirm-dialog">
           <div class="dialog-header">

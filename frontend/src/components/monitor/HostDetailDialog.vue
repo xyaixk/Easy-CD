@@ -90,7 +90,7 @@ function replicaLevelClass(v) {
 <template>
   <Teleport to="body">
     <Transition name="fade">
-      <div v-if="visible" class="dialog-overlay" @click.self="close">
+      <div v-if="visible" class="dialog-overlay">
         <div class="dialog-container">
           <!-- Header -->
           <header class="dialog-header">

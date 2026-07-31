@@ -27,7 +27,7 @@ const close = () => emit('update:visible', false)
 <template>
   <Teleport to="body">
     <Transition name="env-paste-dialog">
-      <div v-if="visible" class="env-paste-overlay" @click.self="close">
+      <div v-if="visible" class="env-paste-overlay">
         <div class="env-paste-dialog" role="dialog" aria-modal="true" aria-labelledby="manual-paste-title">
           <div class="env-paste-header">
             <h4 id="manual-paste-title">粘贴环境变量</h4>

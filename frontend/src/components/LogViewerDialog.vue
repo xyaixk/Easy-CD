@@ -228,7 +228,7 @@ onUnmounted(() => {
 <template>
   <Teleport to="body">
     <Transition name="dialog-fade">
-      <div v-if="visible" class="dialog-overlay" @click="handleClose">
+      <div v-if="visible" class="dialog-overlay">
         <div class="dialog-container" @click.stop>
           <div class="dialog-header">
             <div class="header-content">

@@ -16,9 +16,19 @@ const props = defineProps({
 
 const emit = defineEmits(['update:visible', 'task-finished', 'update:activeCount'])
 
-// 任务列表
+// 任务列表：首页（轮询刷新）+ 翻页累积的更早任务（游标 beforeId）
 const tasks = ref([])
+const olderTasks = ref([])
 const loading = ref(false)
+const loadingOlder = ref(false)
+const hasMore = ref(false)
+const PAGE_SIZE = 50
+
+// 渲染用合并列表：轮询可能把旧首页的任务顶下来，按 id 去重避免重复渲染
+const allTasks = computed(() => {
+  const firstPageIds = new Set(tasks.value.map(t => t.id))
+  return [...tasks.value, ...olderTasks.value.filter(t => !firstPageIds.has(t.id))]
+})
 
 // 展开的任务ID及其完整日志
 const expandedId = ref(null)
@@ -71,16 +81,22 @@ const formatDuration = (ms) => {
   return `${Math.floor(seconds / 60)}m${seconds % 60}s`
 }
 
-// 拉取任务列表
+// 拉取任务列表（首页，轮询复用；翻页数据在 olderTasks 中不受影响）
 const fetchTasks = async () => {
   if (!props.environmentId) {
     tasks.value = []
+    olderTasks.value = []
+    hasMore.value = false
     return
   }
   try {
-    const data = await listTasks(props.environmentId)
+    const data = await listTasks(props.environmentId, PAGE_SIZE)
     detectFinished(data)
     tasks.value = data
+    // 尚未翻过页时，首页拉满即认为可能还有更早的
+    if (olderTasks.value.length === 0) {
+      hasMore.value = data.length >= PAGE_SIZE
+    }
     // 展开中的任务若在执行，增量刷新完整日志
     if (expandedId.value) {
       const expanded = data.find(t => t.id === expandedId.value)
@@ -90,6 +106,23 @@ const fetchTasks = async () => {
     }
   } catch (error) {
     console.error('加载任务列表失败:', error)
+  }
+}
+
+// 加载更早的任务（游标：当前列表最后一条的 id）
+const loadOlder = async () => {
+  if (loadingOlder.value || !props.environmentId) return
+  const list = allTasks.value
+  if (!list.length) return
+  loadingOlder.value = true
+  try {
+    const data = await listTasks(props.environmentId, PAGE_SIZE, list[list.length - 1].id)
+    olderTasks.value = [...olderTasks.value, ...data]
+    hasMore.value = data.length >= PAGE_SIZE
+  } catch (error) {
+    console.error('加载更早任务失败:', error)
+  } finally {
+    loadingOlder.value = false
   }
 }
 
@@ -182,6 +215,8 @@ watch(() => props.visible, async (visible) => {
 
 watch(() => props.environmentId, async () => {
   tasks.value = []
+  olderTasks.value = []
+  hasMore.value = false
   expandedId.value = null
   expandedLog.value = ''
   prevStatusMap = new Map()
@@ -212,7 +247,7 @@ onUnmounted(() => {
 <template>
   <Teleport to="body">
     <Transition name="drawer-fade">
-      <div v-if="visible" class="drawer-overlay" @click.self="close">
+      <div v-if="visible" class="drawer-overlay">
         <Transition name="drawer-slide" appear>
           <div class="drawer-panel">
             <div class="drawer-header">
@@ -240,7 +275,7 @@ onUnmounted(() => {
 
             <div class="drawer-body">
               <!-- 空状态 -->
-              <div v-if="tasks.length === 0" class="task-empty">
+              <div v-if="allTasks.length === 0" class="task-empty">
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                   <circle cx="12" cy="12" r="10"/>
                   <polyline points="12 6 12 12 16 14"/>
@@ -250,7 +285,7 @@ onUnmounted(() => {
 
               <!-- 任务列表 -->
               <div
-                v-for="task in tasks"
+                v-for="task in allTasks"
                 :key="task.id"
                 class="task-item"
                 :class="{ expanded: expandedId === task.id }"
@@ -287,6 +322,14 @@ onUnmounted(() => {
                   <div v-if="task.errorMsg" class="task-error">{{ task.errorMsg }}</div>
                   <pre ref="logRef" class="task-log">{{ expandedLog || '暂无命令输出...' }}</pre>
                 </div>
+              </div>
+
+              <!-- 加载更早的任务 -->
+              <div v-if="hasMore && allTasks.length" class="load-older">
+                <button class="older-btn" :disabled="loadingOlder" @click="loadOlder">
+                  <span v-if="loadingOlder" class="mini-spinner"></span>
+                  {{ loadingOlder ? '加载中...' : '加载更早的任务' }}
+                </button>
               </div>
             </div>
           </div>
@@ -445,6 +488,8 @@ onUnmounted(() => {
 }
 
 .task-item {
+  /* drawer-body 是 flex 纵向容器，不禁止收缩的话任务多时会被压扁挤在一起，滚动条也撑不出来 */
+  flex-shrink: 0;
   border: 1px solid var(--border-color);
   border-radius: 10px;
   background: var(--bg-primary);
@@ -587,5 +632,51 @@ onUnmounted(() => {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.load-older {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0.25rem 0 0.5rem;
+}
+
+.older-btn {
+  height: 28px;
+  padding: 0 1rem;
+  border-radius: 999px;
+  border: 1px dashed var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: all 0.2s;
+}
+
+.older-btn:hover:not(:disabled) {
+  border-color: var(--primary-color);
+  border-style: solid;
+  color: var(--primary-color);
+}
+
+.older-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.mini-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--primary-color);
+  animation: task-spin 0.8s linear infinite;
+}
+
+@keyframes task-spin {
+  to { transform: rotate(360deg); }
 }
 </style>

@@ -26,12 +26,15 @@ public class DeployTaskController {
 
     /**
      * 查询环境下的任务列表（按创建时间倒序，日志截断为预览）
+     * beforeId：游标翻页，只取 id 小于该值的更早任务（轮询首页时不传）
      */
     @GetMapping("/list")
     public Result<List<DeployTaskVO>> list(@RequestParam Long environmentId,
-                                           @RequestParam(defaultValue = "50") Integer limit) {
+                                           @RequestParam(defaultValue = "50") Integer limit,
+                                           @RequestParam(required = false) Long beforeId) {
         LambdaQueryWrapper<DeployTask> wrapper = new LambdaQueryWrapper<DeployTask>()
                 .eq(DeployTask::getEnvironmentId, environmentId)
+                .lt(beforeId != null, DeployTask::getId, beforeId)
                 .orderByDesc(DeployTask::getCreatedTime)
                 .orderByDesc(DeployTask::getId)
                 .last("LIMIT " + Math.min(Math.max(limit, 1), 200));

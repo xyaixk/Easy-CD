@@ -697,7 +697,7 @@ onUnmounted(() => { document.body.style.overflow = '' })
 
         <!-- 导入 Docker 命令弹窗 -->
         <Transition name="dialog-fade">
-          <div v-if="showImportDialog" class="import-overlay" @click.self="showImportDialog = false">
+          <div v-if="showImportDialog" class="import-overlay">
             <div class="import-dialog" @click.stop>
               <div class="import-header">
                 <h4>从 Docker 命令导入</h4>
