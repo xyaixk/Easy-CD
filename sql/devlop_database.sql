@@ -24,6 +24,8 @@ DROP TABLE IF EXISTS `app_service`;
 CREATE TABLE `app_service`  (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
   `environment_id` bigint NOT NULL COMMENT '关联的环境ID',
+  `group_id` bigint NULL DEFAULT NULL COMMENT '服务展示分组ID，NULL表示未分组',
+  `sort_order` int NOT NULL DEFAULT 0 COMMENT '服务在分组内的展示顺序',
   `name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '服务名称',
   `description` varchar(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '服务描述',
   `docker_image` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'Docker镜像地址',
@@ -38,6 +40,7 @@ CREATE TABLE `app_service`  (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_env_name`(`environment_id` ASC, `name` ASC) USING BTREE,
   INDEX `idx_environment_id`(`environment_id` ASC) USING BTREE,
+  INDEX `idx_env_group_sort`(`environment_id` ASC, `group_id` ASC, `sort_order` ASC) USING BTREE,
   INDEX `idx_name`(`name` ASC) USING BTREE,
   INDEX `idx_external_service_id`(`external_service_id` ASC) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 6 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '服务基本信息表' ROW_FORMAT = Dynamic;
@@ -57,6 +60,22 @@ CREATE TABLE `environment`  (
   `updated_time` datetime NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Updated time',
   PRIMARY KEY (`id`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 4 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '环境表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Table structure for service_group
+-- ----------------------------
+DROP TABLE IF EXISTS `service_group`;
+CREATE TABLE `service_group` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '分组ID',
+  `environment_id` bigint NOT NULL COMMENT '所属环境ID',
+  `name` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '分组名称',
+  `sort_order` int NOT NULL DEFAULT 0 COMMENT '分组展示顺序',
+  `created_time` datetime NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `updated_time` datetime NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE INDEX `uk_service_group_env_name`(`environment_id` ASC, `name` ASC) USING BTREE,
+  INDEX `idx_service_group_env_sort`(`environment_id` ASC, `sort_order` ASC) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '服务展示分组表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
 -- Table structure for replica_metrics

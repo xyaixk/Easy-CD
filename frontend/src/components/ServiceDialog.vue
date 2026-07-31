@@ -8,6 +8,12 @@ import toast from '../utils/toast.js'
 const props = defineProps({
   visible: { type: Boolean, default: false },
   currentEnvironment: { type: Object, required: true },
+  environments: { type: Array, default: () => [] },
+  mode: {
+    type: String,
+    default: 'create',
+    validator: value => ['create', 'edit', 'copy'].includes(value)
+  },
   service: { type: Object, default: null }
 })
 
@@ -38,6 +44,7 @@ const emptyForm = () => ({
 })
 
 const formData = ref(emptyForm())
+const selectedEnvironmentId = ref(null)
 
 // 分组折叠状态
 const sections = reactive({
@@ -49,13 +56,21 @@ const sections = reactive({
 const showImportDialog = ref(false)
 const importText = ref('')
 
-const currentDeployType = computed(() => props.currentEnvironment?.deployType || 'docker')
+const isEditMode = computed(() => props.mode === 'edit')
+const isCopyMode = computed(() => props.mode === 'copy')
+const dialogTitle = computed(() => isEditMode.value ? '编辑服务' : '新增服务')
+const effectiveEnvironment = computed(() => {
+  if (!isCopyMode.value) return props.currentEnvironment
+  return props.environments.find(environment => environment.id === selectedEnvironmentId.value)
+})
+const currentDeployType = computed(() => effectiveEnvironment.value?.deployType || 'docker')
 const isDockerDeploy = computed(() => currentDeployType.value === 'docker')
 
 watch(() => props.visible, (val) => {
   if (val) {
     document.body.style.overflow = 'hidden'
-    props.service ? loadServiceData() : (formData.value = emptyForm())
+    selectedEnvironmentId.value = props.currentEnvironment?.id ?? null
+    props.service && props.mode !== 'create' ? loadServiceData() : (formData.value = emptyForm())
   } else {
     document.body.style.overflow = ''
   }
@@ -206,11 +221,24 @@ const strOr = (v, d) => (v == null || v === '') ? d : String(v)
 const addItem = (list, item) => { list.push(item) }
 const removeItem = (list, idx) => { list.splice(idx, 1) }
 
-const handleClose = () => { emit('update:visible', false); formData.value = emptyForm() }
+const handleClose = () => {
+  emit('update:visible', false)
+  formData.value = emptyForm()
+  selectedEnvironmentId.value = null
+}
 
 const validateForm = () => {
   const f = formData.value
   if (!f.serviceName.trim()) { toast.warning('请输入服务名称'); return false }
+  if (!effectiveEnvironment.value?.id) { toast.warning('请选择有效的部署环境'); return false }
+  if (
+    isCopyMode.value &&
+    String(effectiveEnvironment.value.id) === String(props.currentEnvironment?.id) &&
+    f.serviceName.trim().toLowerCase() === String(props.service?.name || '').trim().toLowerCase()
+  ) {
+    toast.warning('复制到当前环境时，请修改服务名称')
+    return false
+  }
   if (f.description && f.description.length > 20) { toast.warning('服务描述最多20字符'); return false }
   if (!f.dockerImage.trim()) { toast.warning('请输入 Docker 镜像'); return false }
   if (f.serviceMode !== 'global' && (f.replicas < 1 || f.replicas > 100)) {
@@ -223,7 +251,7 @@ const handleConfirm = () => {
   if (!validateForm()) return
   const f = formData.value
   const submitData = {
-    environmentId: props.currentEnvironment.id,
+    environmentId: effectiveEnvironment.value.id,
     name: f.serviceName,
     description: f.description,
     dockerImage: f.dockerImage,
@@ -297,7 +325,7 @@ onUnmounted(() => { document.body.style.overflow = '' })
                   <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
                 </svg>
               </div>
-              <h3>{{ service ? '编辑服务' : '新增服务' }}</h3>
+              <h3>{{ dialogTitle }}</h3>
             </div>
             <button class="btn-close" @click="handleClose">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -309,9 +337,22 @@ onUnmounted(() => { document.body.style.overflow = '' })
           <div class="dialog-body">
             <!-- 环境信息 -->
             <div class="env-info">
-              <span class="env-label">部署环境：</span>
-              <span class="env-name">{{ currentEnvironment.name }}</span>
-              <span class="env-type">({{ currentEnvironment.deployType }})</span>
+              <span class="env-label">{{ isCopyMode ? '目标环境：' : '部署环境：' }}</span>
+              <select
+                v-if="isCopyMode"
+                v-model="selectedEnvironmentId"
+                class="env-select"
+              >
+                <option
+                  v-for="environment in environments"
+                  :key="environment.id"
+                  :value="environment.id"
+                >
+                  {{ environment.name }}
+                </option>
+              </select>
+              <span v-else class="env-name">{{ effectiveEnvironment?.name }}</span>
+              <span v-if="effectiveEnvironment?.deployType" class="env-type">({{ effectiveEnvironment.deployType }})</span>
               <button type="button" class="btn-import" @click="openImportDialog">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
@@ -323,7 +364,7 @@ onUnmounted(() => { document.body.style.overflow = '' })
             <!-- 基础信息 -->
             <div class="form-group">
               <label>服务名称 <span class="required">*</span></label>
-              <input v-model="formData.serviceName" type="text" placeholder="user-service" class="form-input" :disabled="!!service" />
+              <input v-model="formData.serviceName" type="text" placeholder="user-service" class="form-input" :disabled="isEditMode" />
             </div>
 
             <div class="form-group">
@@ -342,11 +383,11 @@ onUnmounted(() => { document.body.style.overflow = '' })
               <label>部署模式 <span class="required">*</span></label>
               <div class="radio-group">
                 <label class="radio-item" :class="{ active: formData.serviceMode === 'replicated' }">
-                  <input type="radio" v-model="formData.serviceMode" value="replicated" :disabled="!!service" />
+                  <input type="radio" v-model="formData.serviceMode" value="replicated" :disabled="isEditMode" />
                   <span>副本模式</span>
                 </label>
                 <label class="radio-item" :class="{ active: formData.serviceMode === 'global' }">
-                  <input type="radio" v-model="formData.serviceMode" value="global" :disabled="!!service" />
+                  <input type="radio" v-model="formData.serviceMode" value="global" :disabled="isEditMode" />
                   <span>全局模式</span>
                 </label>
               </div>
@@ -741,6 +782,18 @@ onUnmounted(() => { document.body.style.overflow = '' })
 .env-label { color: var(--text-secondary); font-size: 0.88rem; }
 .env-name { color: var(--primary-color); font-weight: 600; font-size: 0.95rem; }
 .env-type { color: var(--text-tertiary); font-size: 0.82rem; }
+.env-select {
+  min-width: 180px;
+  max-width: 280px;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--primary-color);
+  border-radius: 6px;
+  background: white;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.env-select:focus { outline: none; box-shadow: 0 0 0 3px var(--primary-shadow); }
 
 .btn-import {
   margin-left: auto;

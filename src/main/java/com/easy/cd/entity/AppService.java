@@ -21,6 +21,16 @@ public class AppService {
     private String version;
     
     private Long environmentId;
+
+    /**
+     * 展示分组ID；为空表示“未分组”。
+     */
+    private Long groupId;
+
+    /**
+     * 服务在当前分组中的展示顺序。
+     */
+    private Integer sortOrder;
     
     /**
      * Docker镜像名称

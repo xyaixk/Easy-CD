@@ -7,6 +7,10 @@ const props = defineProps({
   service: {
     type: Object,
     required: true
+  },
+  viewDisabled: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -68,9 +72,12 @@ const modeTooltip = computed(() =>
   metricMode.value === 'avg' ? '点击切换到 MAX（副本中最高值）' : '点击切换到 AVG（副本平均值）'
 )
 
-const emit = defineEmits(['update', 'rollback', 'restart', 'stop', 'scale', 'view', 'edit', 'delete'])
+const emit = defineEmits(['update', 'rollback', 'restart', 'stop', 'scale', 'view', 'edit', 'copy', 'delete'])
 
 const showActionMenu = ref(false)
+const handleCardView = () => {
+  if (!props.viewDisabled) emit('view', props.service)
+}
 
 const getStatusColor = (status) => {
   const colors = {
@@ -126,7 +133,7 @@ const descriptionText = computed(() => {
 </script>
 
 <template>
-  <div class="service-card">
+  <div class="service-card" @click="handleCardView">
     <div class="service-header">
       <h3 class="service-name" :title="service.name">{{ service.name }}</h3>
       <div class="service-meta-row">
@@ -179,17 +186,20 @@ const descriptionText = computed(() => {
     
     <div class="service-footer">
       <span class="last-deploy">最后部署: {{ service.lastDeploy }}</span>
-      <ServiceActionMenu 
-        :service="service"
-        @update="emit('update', service)"
-        @rollback="(payload) => emit('rollback', payload)"
-        @restart="emit('restart', service)"
-        @stop="emit('stop', service)"
-        @scale="(payload) => emit('scale', payload)"
-        @view="emit('view', service)"
-        @edit="emit('edit', service)"
-        @delete="emit('delete', service)"
-      />
+      <div class="service-actions" @click.stop>
+        <ServiceActionMenu
+          :service="service"
+          @update="(payload) => emit('update', payload)"
+          @rollback="(payload) => emit('rollback', payload)"
+          @restart="emit('restart', service)"
+          @stop="emit('stop', service)"
+          @scale="(payload) => emit('scale', payload)"
+          @view="emit('view', service)"
+          @edit="emit('edit', service)"
+          @copy="emit('copy', service)"
+          @delete="emit('delete', service)"
+        />
+      </div>
     </div>
   </div>
 </template>
@@ -200,6 +210,7 @@ const descriptionText = computed(() => {
   border: 1px solid var(--border-color);
   border-radius: 12px;
   padding: 1.25rem;
+  cursor: pointer;
   transition: all 0.3s;
 }
 

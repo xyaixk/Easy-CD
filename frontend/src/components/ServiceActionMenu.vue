@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import ConfirmDialog from './ConfirmDialog.vue'
+import ImageUpdateDialog from './ImageUpdateDialog.vue'
 import RollbackDialog from './RollbackDialog.vue'
 import ScaleDialog from './ScaleDialog.vue'
 
@@ -11,17 +12,17 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update', 'rollback', 'restart', 'stop', 'scale', 'view', 'edit', 'delete'])
+const emit = defineEmits(['update', 'rollback', 'restart', 'stop', 'scale', 'view', 'edit', 'copy', 'delete'])
 
 const showMenu = ref(false)
 const wrapperRef = ref(null)
 const showConfirmDialog = ref(false)
+const showImageUpdateDialog = ref(false)
 const showRollbackDialog = ref(false)
 const showScaleDialog = ref(false)
 const pendingAction = ref(null)
 
 const actionMessages = {
-  update: { title: '确认更新', message: '确定要更新此服务吗？' },
   restart: { title: '确认重启', message: '确定要重启此服务吗？' },
   stop: { title: '确认停止', message: '确定要停止此服务吗？' },
   delete: { title: '确认删除', message: '此操作不可恢复，确定要删除此服务吗？' }
@@ -30,15 +31,15 @@ const actionMessages = {
 const handleAction = (action) => {
   showMenu.value = false
   
-  // 查看副本直接执行，不需要确认
-  if (action === 'view') {
+  // 查看、编辑、复制直接触发，不需要确认
+  if (['view', 'edit', 'copy'].includes(action)) {
     emit(action)
     return
   }
   
-  // 编辑服务直接触发
-  if (action === 'edit') {
-    emit(action)
+  // 更新服务时仅输入目标镜像 Tag
+  if (action === 'update') {
+    showImageUpdateDialog.value = true
     return
   }
   
@@ -72,6 +73,10 @@ const handleCancelConfirm = () => {
 
 const handleRollbackConfirm = (version) => {
   emit('rollback', { service: props.service, version })
+}
+
+const handleImageUpdateConfirm = (dockerImage) => {
+  emit('update', { service: props.service, dockerImage })
 }
 
 const handleScaleConfirm = (replicas) => {
@@ -192,6 +197,16 @@ onUnmounted(() => {
           </svg>
           <span>编辑</span>
         </button>
+        <button
+          class="grid-item"
+          @click="handleAction('copy')"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="11" height="11" rx="2"/>
+            <path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/>
+          </svg>
+          <span>复制服务</span>
+        </button>
         <button 
           class="grid-item"
           :disabled="service.status === 'stopped'"
@@ -219,6 +234,12 @@ onUnmounted(() => {
       @cancel="handleCancelConfirm"
     />
     
+    <ImageUpdateDialog
+      v-model:visible="showImageUpdateDialog"
+      :service="service"
+      @confirm="handleImageUpdateConfirm"
+    />
+
     <RollbackDialog
       v-model:visible="showRollbackDialog"
       :service="service"
@@ -288,7 +309,7 @@ onUnmounted(() => {
 
 .action-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 1px;
   background: var(--border-color);
   border-radius: 8px;

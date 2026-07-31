@@ -14,6 +14,7 @@ import com.easy.cd.dto.ServiceUpdateDTO;
 import com.easy.cd.entity.*;
 import com.easy.cd.exception.BusinessException;
 import com.easy.cd.mapper.*;
+import com.easy.cd.service.ServiceGroupService;
 import com.easy.cd.service.ServiceManagementService;
 import com.easy.cd.vo.ServiceDetailVO;
 import lombok.RequiredArgsConstructor;
@@ -50,6 +51,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     private final EnvironmentMapper environmentMapper;
     private final DeployService deployService;
     private final DeployTaskQueueService deployTaskQueueService;
+    private final ServiceGroupService serviceGroupService;
 
     /** 自身代理：队列 worker 线程内调用 doXxx 时保证 @Transactional 生效 */
     @Autowired
@@ -188,6 +190,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         // 查询环境下的所有服务
         LambdaQueryWrapper<AppService> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(AppService::getEnvironmentId, environmentId)
+                   .orderByAsc(AppService::getSortOrder)
                    .orderByDesc(AppService::getCreatedTime);
         List<AppService> services = serviceMapper.selectList(queryWrapper);
         
@@ -730,6 +733,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         service.setName(createDTO.getName());
         service.setDescription(createDTO.getDescription());
         service.setEnvironmentId(createDTO.getEnvironmentId());
+        service.setGroupId(null);
+        service.setSortOrder(serviceGroupService.nextUngroupedSortOrder(createDTO.getEnvironmentId()));
         service.setDockerImage(createDTO.getDockerImage());
         service.setDockerParams(createDTO.getDockerParams());
         String serviceMode = normalizeServiceMode(createDTO.getServiceMode());
@@ -903,6 +908,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         // 基础信息
         vo.setId(service.getId());
         vo.setEnvironmentId(service.getEnvironmentId());
+        vo.setGroupId(service.getGroupId());
+        vo.setSortOrder(service.getSortOrder() == null ? 0 : service.getSortOrder());
         vo.setName(service.getName());
         vo.setDescription(service.getDescription());
         vo.setDockerImage(service.getDockerImage());

@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import AppHeader from './components/AppHeader.vue'
-import ServiceCard from './components/ServiceCard.vue'
+import ServiceGroupBoard from './components/ServiceGroupBoard.vue'
+import ServiceGroupDialog from './components/ServiceGroupDialog.vue'
 import EnvDialog from './components/EnvDialog.vue'
 import ServiceDialog from './components/ServiceDialog.vue'
 import ReplicasDialog from './components/ReplicasDialog.vue'
@@ -24,8 +25,16 @@ import {
   rollbackService,
   scaleService
 } from '@/api/service'
+import {
+  createServiceGroup,
+  deleteServiceGroup,
+  listServiceGroups,
+  saveServiceLayout,
+  updateServiceGroup
+} from '@/api/serviceGroup'
 import { clearAuth, getCurrentUser as getStoredUser, getToken, setAuth } from '@/utils/auth'
 import { enrichServiceMetrics } from '@/api/monitor'
+import { applyServiceLayout } from '@/utils/serviceLayout'
 
 // 环境列表
 const environments = ref([])
@@ -53,6 +62,16 @@ const showEnvDialog = ref(false)
 // 显示服务对话框
 const showServiceDialog = ref(false)
 const currentService = ref(null)
+const serviceDialogMode = ref('create')
+
+// 服务分组与布局
+const serviceGroups = ref([])
+const showGroupDialog = ref(false)
+const groupDialogMode = ref('create')
+const currentGroup = ref(null)
+const groupDialogLoading = ref(false)
+const layoutSaving = ref(false)
+const layoutDragging = ref(false)
 
 // 显示副本对话框
 const showReplicasDialog = ref(false)
@@ -164,6 +183,7 @@ const handleLogout = async () => {
     clearAuth()
     currentUser.value = null
     services.value = []
+    serviceGroups.value = []
     await loadEnvironments()
     await loadServices()
     toast.success('已退出登录')
@@ -196,6 +216,17 @@ const filteredServices = computed(() => {
   }
   
   return result
+})
+
+const hasActiveServiceFilter = computed(() =>
+  selectedStatus.value !== 'all' || Boolean(searchKeyword.value.trim())
+)
+
+const shouldShowServiceBoard = computed(() => {
+  if (hasActiveServiceFilter.value) {
+    return filteredServices.value.length > 0
+  }
+  return services.value.length > 0 || serviceGroups.value.length > 0
 })
 
 // 获取各状态的服务数量
@@ -286,14 +317,22 @@ const loadEnvironments = async () => {
 }
 
 // 加载服务列表
-const loadServices = async () => {
+const loadServices = async ({ force = false } = {}) => {
   if (!selectedEnv.value) {
     services.value = []
+    serviceGroups.value = []
     return
   }
-  
+  if (!force && (layoutDragging.value || layoutSaving.value)) return
+
+  const environmentId = selectedEnv.value
   try {
-    const data = await listServices(selectedEnv.value)
+    const [data, groups] = await Promise.all([
+      listServices(environmentId),
+      listServiceGroups(environmentId)
+    ])
+    if (selectedEnv.value !== environmentId) return
+
     // 转换为前端需要的格式
     const newServices = data.map(service => ({
       id: service.id,
@@ -312,6 +351,8 @@ const loadServices = async () => {
       // Docker配置信息（编辑时需要）
       dockerImage: service.dockerImage || '',
       dockerParams: service.dockerParams || '',
+      groupId: service.groupId ?? null,
+      sortOrder: service.sortOrder ?? 0,
       // 监控指标
       cpuPercent: service.cpuPercent || 0,
       memoryUsage: service.memoryUsage || 0,
@@ -325,8 +366,11 @@ const loadServices = async () => {
 
     // 并发补齐 sparkline（失败静默），不阻塞接下来的 diff 更新
     const enriched = await enrichServiceMetrics(newServices)
+    if (selectedEnv.value !== environmentId) return
+    if (!force && (layoutDragging.value || layoutSaving.value)) return
 
     // 只更新有变化的服务
+    serviceGroups.value = groups
     updateChangedServices(enriched)
   } catch (error) {
     console.error('加载服务列表失败:', error)
@@ -336,37 +380,12 @@ const loadServices = async () => {
 
 // 智能更新：只更新有变化的服务
 const updateChangedServices = (newServices) => {
-  if (services.value.length === 0) {
-    // 首次加载，直接赋值
-    services.value = newServices
-    return
-  }
-  
   const oldServicesMap = new Map(services.value.map(s => [s.id, s]))
-  const newServicesMap = new Map(newServices.map(s => [s.id, s]))
-  
-  // 检查是否有服务被删除或新增
-  const hasStructureChange = 
-    services.value.length !== newServices.length ||
-    services.value.some(s => !newServicesMap.has(s.id)) ||
-    newServices.some(s => !oldServicesMap.has(s.id))
-  
-  if (hasStructureChange) {
-    // 服务列表结构发生变化，整体更新
-    services.value = newServices
-    return
-  }
-  
-  // 只更新有变化的服务
-  newServices.forEach((newService, index) => {
+  services.value = newServices.map(newService => {
     const oldService = oldServicesMap.get(newService.id)
-    if (oldService && hasServiceChanged(oldService, newService)) {
-      // 找到对应位置并更新
-      const serviceIndex = services.value.findIndex(s => s.id === newService.id)
-      if (serviceIndex !== -1) {
-        services.value[serviceIndex] = newService
-      }
-    }
+    return oldService && !hasServiceChanged(oldService, newService)
+      ? oldService
+      : newService
   })
 }
 
@@ -379,6 +398,12 @@ const hasServiceChanged = (oldService, newService) => {
     oldService.desiredInstances !== newService.desiredInstances ||
     oldService.lastDeploy !== newService.lastDeploy ||
     oldService.description !== newService.description ||
+    oldService.dockerImage !== newService.dockerImage ||
+    oldService.dockerParams !== newService.dockerParams ||
+    oldService.serviceMode !== newService.serviceMode ||
+    oldService.replicas !== newService.replicas ||
+    oldService.groupId !== newService.groupId ||
+    oldService.sortOrder !== newService.sortOrder ||
     // 监控指标变化检测
     oldService.cpuPercent !== newService.cpuPercent ||
     oldService.memoryUsage !== newService.memoryUsage ||
@@ -397,7 +422,8 @@ const startAutoRefresh = () => {
   refreshTimer = setInterval(() => {
     // 如果有对话框打开，暂停刷新避免冲突
     if (!showEnvDialog.value && !showServiceDialog.value && 
-        !showReplicasDialog.value && !showConfigDialog.value) {
+        !showReplicasDialog.value && !showConfigDialog.value &&
+        !showGroupDialog.value && !layoutDragging.value && !layoutSaving.value) {
       loadServices()
     }
   }, REFRESH_INTERVAL)
@@ -413,7 +439,10 @@ const stopAutoRefresh = () => {
 
 // 监听环境切换，重新加载服务列表并缓存选中的环境
 watch(selectedEnv, (newEnvId) => {
-  loadServices()
+  // 立即移除旧环境数据；环境切换不能被拖拽/布局保存的刷新保护跳过
+  services.value = []
+  serviceGroups.value = []
+  loadServices({ force: true })
   // 缓存选中的环境ID
   if (newEnvId) {
     localStorage.setItem('selectedEnvId', newEnvId)
@@ -480,18 +509,108 @@ const handleDeleteEnvironment = async (envId) => {
   }
 }
 
+const openCreateGroupDialog = () => {
+  if (layoutDragging.value || layoutSaving.value) return
+  if (!selectedEnv.value) {
+    toast.warning('请先选择一个环境')
+    return
+  }
+  currentGroup.value = null
+  groupDialogMode.value = 'create'
+  showGroupDialog.value = true
+}
+
+const openRenameGroupDialog = (group) => {
+  if (layoutDragging.value || layoutSaving.value) return
+  currentGroup.value = group
+  groupDialogMode.value = 'edit'
+  showGroupDialog.value = true
+}
+
+const closeGroupDialog = () => {
+  if (!groupDialogLoading.value) showGroupDialog.value = false
+}
+
+const handleConfirmGroup = async (name) => {
+  if (!selectedEnv.value) return
+
+  groupDialogLoading.value = true
+  try {
+    if (groupDialogMode.value === 'edit') {
+      const updatedGroup = await updateServiceGroup(currentGroup.value.id, { name })
+      serviceGroups.value = serviceGroups.value.map(group =>
+        group.id === updatedGroup.id ? updatedGroup : group
+      )
+      toast.success(`分组已重命名为「${updatedGroup.name}」`)
+    } else {
+      const createdGroup = await createServiceGroup({
+        environmentId: selectedEnv.value,
+        name
+      })
+      serviceGroups.value = [...serviceGroups.value, createdGroup]
+      toast.success(`分组「${createdGroup.name}」创建成功`)
+    }
+    showGroupDialog.value = false
+  } catch (error) {
+    console.error('保存服务分组失败:', error)
+    toast.error(error.message || '保存分组失败，请重试')
+  } finally {
+    groupDialogLoading.value = false
+  }
+}
+
+const handleDeleteGroup = async (group) => {
+  if (layoutDragging.value || layoutSaving.value) return
+  const serviceCount = services.value.filter(service => service.groupId === group.id).length
+  const moveMessage = serviceCount > 0
+    ? `，其中 ${serviceCount} 个服务将移至「未分组」末尾`
+    : ''
+  if (!confirm(`确定删除分组「${group.name}」吗${moveMessage}？`)) return
+
+  try {
+    await deleteServiceGroup(group.id)
+    await loadServices()
+    toast.success(`分组「${group.name}」已删除`)
+  } catch (error) {
+    console.error('删除服务分组失败:', error)
+    toast.error(error.message || '删除分组失败，请重试')
+  }
+}
+
+const handleLayoutChange = async (layout) => {
+  if (layoutSaving.value || selectedEnv.value !== layout.environmentId) return
+
+  const previousServices = services.value
+  const previousGroups = serviceGroups.value
+  const optimisticLayout = applyServiceLayout(previousServices, previousGroups, layout)
+  services.value = optimisticLayout.services
+  serviceGroups.value = optimisticLayout.groups
+  layoutSaving.value = true
+
+  try {
+    await saveServiceLayout(layout)
+  } catch (error) {
+    console.error('保存服务布局失败:', error)
+    if (selectedEnv.value === layout.environmentId) {
+      services.value = previousServices
+      serviceGroups.value = previousGroups
+      await loadServices({ force: true })
+    }
+    toast.error(error.message || '保存布局失败，已恢复原顺序')
+  } finally {
+    layoutSaving.value = false
+  }
+}
+
 // 服务操作方法（均为异步：提交后返回任务ID，实际执行在后台队列）
-// 更新操作：重新部署服务（拉取最新镜像）
-const updateService = async (service) => {
+// 更新操作：仅变更镜像，其他服务配置由后端沿用数据库现值
+const updateService = async ({ service, dockerImage }) => {
   try {
     const taskId = await updateServiceApi(service.id, {
       name: service.name,
-      description: service.description,
-      dockerImage: service.dockerImage,
-      dockerParams: service.dockerParams,
-      replicas: service.replicas || 1
+      dockerImage
     })
-    onTaskSubmitted(taskId, `服务「${service.name}」更新部署`)
+    onTaskSubmitted(taskId, `服务「${service.name}」更新镜像至 ${dockerImage}`)
   } catch (error) {
     console.error('更新服务失败:', error)
     toast.error(error.message || '更新失败，请重试')
@@ -545,6 +664,13 @@ const viewLogs = (service) => {
 
 const editConfig = (service) => {
   currentService.value = service
+  serviceDialogMode.value = 'edit'
+  showServiceDialog.value = true
+}
+
+const copyService = (service) => {
+  currentService.value = service
+  serviceDialogMode.value = 'copy'
   showServiceDialog.value = true
 }
 
@@ -561,20 +687,34 @@ const deleteServiceHandler = async (service) => {
 // 打开新增服务对话框
 const handleAddService = () => {
   currentService.value = null
+  serviceDialogMode.value = 'create'
   showServiceDialog.value = true
 }
 
 // 确认新增/编辑服务（异步提交）
 const handleConfirmService = async (serviceData) => {
+  const dialogMode = serviceDialogMode.value
+  const serviceId = currentService.value?.id
+
   try {
-    if (currentService.value) {
+    if (dialogMode === 'edit') {
       // 编辑服务
-      const taskId = await updateServiceApi(currentService.value.id, serviceData)
+      const taskId = await updateServiceApi(serviceId, serviceData)
       onTaskSubmitted(taskId, `服务「${serviceData.name}」修改`)
     } else {
       // 新增服务
       const taskId = await createServiceApi(serviceData)
-      onTaskSubmitted(taskId, `服务「${serviceData.name}」创建`)
+      if (dialogMode === 'copy') {
+        const targetEnvironment = environments.value.find(env => env.id === serviceData.environmentId)
+        selectedEnv.value = serviceData.environmentId
+        await nextTick()
+        onTaskSubmitted(
+          taskId,
+          `服务「${serviceData.name}」复制到「${targetEnvironment?.name || '目标环境'}」`
+        )
+      } else {
+        onTaskSubmitted(taskId, `服务「${serviceData.name}」创建`)
+      }
     }
   } catch (error) {
     console.error('保存服务失败:', error)
@@ -657,6 +797,17 @@ const handleConfirmService = async (serviceData) => {
             已停止
             <span class="count neutral">{{ statusCounts.stopped }}</span>
           </button>
+          <button
+            class="btn btn-secondary"
+            :disabled="layoutDragging || layoutSaving"
+            @click="openCreateGroupDialog"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 7h7l2 2h9v10H3z"/>
+              <path d="M12 12v4M10 14h4"/>
+            </svg>
+            新建分组
+          </button>
           <button class="btn btn-primary" @click="handleAddService">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"/>
@@ -667,31 +818,37 @@ const handleConfirmService = async (serviceData) => {
         </div>
       </div>
 
-      <!-- 服务列表 -->
-      <div class="services-grid">
-        <ServiceCard
-          v-for="service in filteredServices" 
-          :key="service.id"
-          :service="service"
-          @update="updateService"
-          @rollback="rollbackServiceHandler"
-          @restart="restartServiceHandler"
-          @stop="stopServiceHandler"
-          @scale="scaleServiceHandler"
-          @view="viewLogs"
-          @edit="editConfig"
-          @delete="deleteServiceHandler"
-        />
-      </div>
+      <ServiceGroupBoard
+        v-if="selectedEnv && shouldShowServiceBoard"
+        :environment-id="selectedEnv"
+        :services="filteredServices"
+        :groups="serviceGroups"
+        :drag-disabled="hasActiveServiceFilter"
+        :layout-saving="layoutSaving"
+        @layout-change="handleLayoutChange"
+        @dragging-change="layoutDragging = $event"
+        @rename-group="openRenameGroupDialog"
+        @delete-group="handleDeleteGroup"
+        @update="updateService"
+        @rollback="rollbackServiceHandler"
+        @restart="restartServiceHandler"
+        @stop="stopServiceHandler"
+        @scale="scaleServiceHandler"
+        @view="viewLogs"
+        @edit="editConfig"
+        @copy="copyService"
+        @delete="deleteServiceHandler"
+      />
 
       <!-- 空状态 -->
-      <div v-if="filteredServices.length === 0" class="empty-state">
+      <div v-if="!shouldShowServiceBoard" class="empty-state">
         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <circle cx="12" cy="12" r="10"/>
           <path d="M8 15h8M9 9h.01M15 9h.01"/>
         </svg>
         <h3>未找到服务</h3>
-        <p>没有匹配 "{{ searchKeyword }}" 的服务</p>
+        <p v-if="hasActiveServiceFilter">当前搜索或状态条件下没有匹配的服务</p>
+        <p v-else>当前环境还没有服务，可以先新增服务或创建分组</p>
       </div>
     </main>
 
@@ -717,9 +874,20 @@ const handleConfirmService = async (serviceData) => {
     <ServiceDialog
       :visible="showServiceDialog"
       :current-environment="environments.find(e => e.id === selectedEnv) || {}"
+      :environments="environments"
+      :mode="serviceDialogMode"
       :service="currentService"
       @update:visible="showServiceDialog = $event"
       @confirm="handleConfirmService"
+    />
+
+    <ServiceGroupDialog
+      :visible="showGroupDialog"
+      :mode="groupDialogMode"
+      :group="currentGroup"
+      :loading="groupDialogLoading"
+      @close="closeGroupDialog"
+      @confirm="handleConfirmGroup"
     />
     
     <!-- 副本对话框 -->
@@ -906,13 +1074,18 @@ const handleConfirmService = async (serviceData) => {
   border: none;
 }
 
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-primary {
   background: var(--primary-gradient);
   color: white;
   box-shadow: 0 2px 8px rgba(102, 126, 234, 0.25);
 }
 
-.btn-primary:hover {
+.btn-primary:hover:not(:disabled) {
   transform: translateY(-2px);
   box-shadow: 0 4px 16px rgba(102, 126, 234, 0.35);
 }
@@ -923,7 +1096,7 @@ const handleConfirmService = async (serviceData) => {
   color: var(--text-primary);
 }
 
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   border-color: var(--border-hover);
   background: var(--bg-hover);
 }

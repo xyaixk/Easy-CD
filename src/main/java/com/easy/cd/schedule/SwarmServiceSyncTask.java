@@ -9,6 +9,7 @@ import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
 import com.easy.cd.mapper.EnvironmentMapper;
 import com.easy.cd.mapper.ServiceMapper;
+import com.easy.cd.service.ServiceGroupService;
 import com.easy.cd.util.SshExecutor;
 import com.easy.cd.util.SshExecutor.SshHost;
 import com.easy.cd.util.SshExecutor.SshResult;
@@ -41,6 +42,9 @@ public class SwarmServiceSyncTask {
 
     @Resource
     private ServiceMapper serviceMapper;
+
+    @Resource
+    private ServiceGroupService serviceGroupService;
 
     @Resource
     private SshExecutor sshExecutor;
@@ -127,6 +131,8 @@ public class SwarmServiceSyncTask {
                     AppService newSvc = new AppService();
                     newSvc.setName(swarmSvc.name);
                     newSvc.setEnvironmentId(environment.getId());
+                    newSvc.setGroupId(null);
+                    newSvc.setSortOrder(serviceGroupService.nextUngroupedSortOrder(environment.getId()));
                     newSvc.setExternalServiceName(swarmSvc.name);
                     newSvc.setExternalServiceId(swarmSvc.id);
                     newSvc.setDockerImage(swarmSvc.image);
