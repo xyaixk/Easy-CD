@@ -37,7 +37,7 @@ deploy:
 # 监控采集配置
 monitor:
   # 总开关：false 时所有采集/同步 Task 不启动
-  enabled: true
+  enabled: false
   # 采集器参数
   collector:
     # 高频 SSH 状态和指标采集周期
