@@ -5,6 +5,7 @@ import com.easy.cd.auth.AuthContext;
 import com.easy.cd.auth.LoginUser;
 import com.easy.cd.entity.DeployTask;
 import com.easy.cd.mapper.DeployTaskMapper;
+import com.easy.cd.service.ServiceStatusSyncService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -40,6 +41,7 @@ public class DeployTaskQueueService {
     public static final String STATUS_FAILED = "FAILED";
 
     private final DeployTaskMapper deployTaskMapper;
+    private final ServiceStatusSyncService serviceStatusSyncService;
 
     /** 每环境一个单线程执行器，懒创建 */
     private final ConcurrentHashMap<Long, ExecutorService> executors = new ConcurrentHashMap<>();
@@ -100,7 +102,7 @@ public class DeployTaskQueueService {
     /**
      * worker 线程内执行任务：更新状态 → 绑定日志上下文 → 执行业务闭包 → 落终态
      */
-    private void runTask(Long taskId, Runnable action) {
+    void runTask(Long taskId, Runnable action) {
         DeployTask task = deployTaskMapper.selectById(taskId);
         if (task == null) {
             log.warn("任务记录不存在，跳过执行: taskId={}", taskId);
@@ -130,6 +132,13 @@ public class DeployTaskQueueService {
             log.error("部署任务执行失败: taskId={}, type={}, service={}", taskId, task.getTaskType(), task.getServiceName(), e);
         } finally {
             TaskLogContext.unbind();
+            try {
+                serviceStatusSyncService.refreshAfterTask(
+                        task.getTaskType(), task.getServiceId(), STATUS_SUCCESS.equals(task.getStatus()));
+            } catch (Exception e) {
+                log.warn("任务结束后同步服务状态失败: taskId={}, serviceId={}",
+                        taskId, task.getServiceId(), e);
+            }
             task.setFinishedTime(LocalDateTime.now());
             task.setCommandLog(context.content());
             deployTaskMapper.updateById(task);

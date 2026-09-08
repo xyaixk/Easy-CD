@@ -20,6 +20,7 @@ import {
   createService as createServiceApi, 
   updateService as updateServiceApi, 
   deleteService as deleteServiceApi, 
+  getService,
   listServices,
   restartService,
   stopService,
@@ -42,6 +43,7 @@ import {
 } from '@/utils/deployTask'
 import { enrichServiceMetrics } from '@/api/monitor'
 import { applyServiceLayout } from '@/utils/serviceLayout'
+import { mapServiceDetail, removeServiceCard, upsertServiceCard } from '@/utils/serviceCardState'
 import { useMinimumVisible } from '@/composables/useMinimumVisible'
 
 // 环境列表
@@ -142,10 +144,11 @@ const handleOpenTasks = () => {
 
 // 任务提交成功后：提示 + 打开任务面板并立即刷新
 const onTaskSubmitted = (taskId, message, taskContext = null) => {
-  if (taskContext?.serviceId != null) {
-    const optimisticTask = {
+  let optimisticTask = null
+  if (taskContext) {
+    optimisticTask = {
       id: taskId,
-      serviceId: taskContext.serviceId,
+      serviceId: taskContext.serviceId ?? null,
       serviceName: taskContext.serviceName,
       taskType: taskContext.taskType,
       status: 'PENDING'
@@ -159,12 +162,8 @@ const onTaskSubmitted = (taskId, message, taskContext = null) => {
 
   toast.success(`${message}，任务 #${taskId} 已提交`)
   showTaskDrawer.value = true
-  taskDrawerRef.value?.refresh()
-}
-
-// 任务执行结束（成功/失败）时刷新服务列表
-const handleTaskFinished = async () => {
-  await loadServices()
+  if (optimisticTask) taskDrawerRef.value?.trackTask(optimisticTask)
+  void taskDrawerRef.value?.refresh()
 }
 
 // 宿主机详情弹窗
@@ -244,6 +243,8 @@ const handleLogout = async () => {
 
 // 服务列表数据
 const services = ref([])
+let serviceDataEpoch = 0
+const serviceRefreshTokens = new Map()
 const serviceLoadCount = ref(0)
 const serviceBlockingLoadCount = ref(0)
 const servicesLoading = computed(() => serviceLoadCount.value > 0)
@@ -385,6 +386,7 @@ const loadServices = async ({ force = false, blocking = false } = {}) => {
   if (!force && (layoutDragging.value || layoutSaving.value)) return
 
   const environmentId = selectedEnv.value
+  const dataEpoch = serviceDataEpoch
   serviceLoadCount.value += 1
   if (blocking) serviceBlockingLoadCount.value += 1
   try {
@@ -392,42 +394,14 @@ const loadServices = async ({ force = false, blocking = false } = {}) => {
       listServices(environmentId),
       listServiceGroups(environmentId)
     ])
-    if (selectedEnv.value !== environmentId) return
+    if (selectedEnv.value !== environmentId || dataEpoch !== serviceDataEpoch) return
 
     // 转换为前端需要的格式
-    const newServices = data.map(service => ({
-      id: service.id,
-      name: service.name,
-      description: service.description || '',
-      version: service.version,
-      status: service.status || 'unknown',
-      lastDeploy: service.deployTime || service.createdTime,
-      branch: 'main', // 后端暂无此字段
-      healthyInstances: service.healthyInstances || 0,
-      instances: service.instances || 0,
-      desiredInstances: service.desiredInstances || 0,
-      // 服务模式和副本数
-      serviceMode: service.serviceMode || 'replicated',
-      replicas: service.replicas || service.desiredInstances || 1,
-      // Docker配置信息（编辑时需要）
-      dockerImage: service.dockerImage || '',
-      dockerParams: service.dockerParams || '',
-      groupId: service.groupId ?? null,
-      sortOrder: service.sortOrder ?? 0,
-      // 监控指标
-      cpuPercent: service.cpuPercent || 0,
-      memoryUsage: service.memoryUsage || 0,
-      memoryLimit: service.memoryLimit || 0,
-      memoryPercent: service.memoryPercent || 0,
-      networkRxRate: service.networkRxRate || 0,
-      networkTxRate: service.networkTxRate || 0,
-      diskReadRate: service.diskReadRate || 0,
-      diskWriteRate: service.diskWriteRate || 0
-    }))
+    const newServices = data.map(service => mapServiceDetail(service))
 
     // 并发补齐 sparkline（失败静默），不阻塞接下来的 diff 更新
     const enriched = await enrichServiceMetrics(newServices)
-    if (selectedEnv.value !== environmentId) return
+    if (selectedEnv.value !== environmentId || dataEpoch !== serviceDataEpoch) return
     if (!force && (layoutDragging.value || layoutSaving.value)) return
 
     // 只更新有变化的服务
@@ -453,6 +427,75 @@ const updateChangedServices = (newServices) => {
       ? oldService
       : newService
   })
+}
+
+const isTaskForCurrentEnvironment = task =>
+  task?.environmentId == null || String(task.environmentId) === String(selectedEnv.value)
+
+const nextServiceRefreshToken = serviceId => {
+  const serviceKey = String(serviceId)
+  const token = (serviceRefreshTokens.get(serviceKey) || 0) + 1
+  serviceRefreshTokens.set(serviceKey, token)
+  return { serviceKey, token }
+}
+
+const updateOpenServiceReference = service => {
+  if (selectedService.value && String(selectedService.value.id) === String(service.id)) {
+    selectedService.value = service
+  }
+  if (currentService.value && String(currentService.value.id) === String(service.id)) {
+    currentService.value = service
+  }
+}
+
+const refreshServiceCard = async task => {
+  const environmentId = selectedEnv.value
+  const { serviceKey, token } = nextServiceRefreshToken(task.serviceId)
+  serviceDataEpoch += 1
+
+  try {
+    const detail = await getService(task.serviceId)
+    if (selectedEnv.value !== environmentId || !isTaskForCurrentEnvironment(task)) return
+    if (detail.environmentId != null && String(detail.environmentId) !== String(environmentId)) return
+    if (serviceRefreshTokens.get(serviceKey) !== token) return
+
+    services.value = upsertServiceCard(services.value, detail)
+    const refreshed = services.value.find(service => String(service.id) === serviceKey)
+    if (refreshed) updateOpenServiceReference(refreshed)
+  } catch (error) {
+    if (selectedEnv.value === environmentId && serviceRefreshTokens.get(serviceKey) === token) {
+      console.error('定向刷新服务卡片失败:', error)
+      await loadServices({ force: true })
+    }
+  }
+}
+
+// 任务进入终态后，优先定向刷新对应卡片；创建和删除处理列表结构变化。
+const handleTaskFinished = async task => {
+  if (!isTaskForCurrentEnvironment(task)) return
+
+  if (task.status === 'SUCCESS' && task.taskType === 'DELETE' && task.serviceId != null) {
+    serviceDataEpoch += 1
+    nextServiceRefreshToken(task.serviceId)
+    services.value = removeServiceCard(services.value, task.serviceId)
+    if (selectedService.value && String(selectedService.value.id) === String(task.serviceId)) {
+      selectedService.value = null
+      showReplicasDialog.value = false
+    }
+    if (currentService.value && String(currentService.value.id) === String(task.serviceId)) {
+      currentService.value = null
+      showServiceDialog.value = false
+    }
+    return
+  }
+
+  if (task.serviceId == null || task.taskType === 'CREATE') {
+    serviceDataEpoch += 1
+    await loadServices({ force: true })
+    return
+  }
+
+  await refreshServiceCard(task)
 }
 
 // 检查服务是否发生变化
@@ -510,6 +553,8 @@ watch(selectedEnv, (newEnvId) => {
   showDeleteGroupConfirm.value = false
   pendingDeleteGroup.value = null
   activeTasks.value = []
+  serviceDataEpoch += 1
+  serviceRefreshTokens.clear()
   services.value = []
   serviceGroups.value = []
   loadServices({ force: true, blocking: true })
@@ -834,10 +879,19 @@ const handleConfirmService = async (serviceData) => {
         await nextTick()
         onTaskSubmitted(
           taskId,
-          `服务「${serviceData.name}」复制到「${targetEnvironment?.name || '目标环境'}」`
+          `服务「${serviceData.name}」复制到「${targetEnvironment?.name || '目标环境'}」`,
+          {
+            serviceId: null,
+            serviceName: serviceData.name,
+            taskType: 'CREATE'
+          }
         )
       } else {
-        onTaskSubmitted(taskId, `服务「${serviceData.name}」创建`)
+        onTaskSubmitted(taskId, `服务「${serviceData.name}」创建`, {
+          serviceId: null,
+          serviceName: serviceData.name,
+          taskType: 'CREATE'
+        })
       }
     }
   } catch (error) {

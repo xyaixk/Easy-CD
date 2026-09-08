@@ -14,7 +14,9 @@ import com.easy.cd.mapper.ReplicaMetricsMapper;
 import com.easy.cd.mapper.ReplicaStatusMapper;
 import com.easy.cd.mapper.ServiceMapper;
 import com.easy.cd.mapper.ServiceStatusMapper;
+import com.easy.cd.service.ReplicaStatusSyncService;
 import com.easy.cd.service.ServiceGroupService;
+import com.easy.cd.service.ServiceStatusSyncService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -41,7 +43,9 @@ class ServiceManagementServiceImageUpdateTest {
                 environmentMapper,
                 deployService,
                 mock(DeployTaskQueueService.class),
-                mock(ServiceGroupService.class));
+                mock(ServiceGroupService.class),
+                mock(ServiceStatusSyncService.class),
+                mock(ReplicaStatusSyncService.class));
 
         AppService appService = appService();
         Environment environment = new Environment();

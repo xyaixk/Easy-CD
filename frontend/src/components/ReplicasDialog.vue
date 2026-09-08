@@ -304,6 +304,12 @@ const handleViewServiceLogs = () => {
   showLogViewer.value = true
 }
 
+// 查看指定副本日志
+const handleViewReplicaLogs = (replica) => {
+  selectedReplica.value = replica
+  showLogViewer.value = true
+}
+
 // 进入容器：打开 Web 终端（需要副本在运行中且已采到容器 ID）
 const canEnterContainer = (replica) =>
   !props.readOnly && replica.status === 'running' && !!replica.containerId
@@ -478,6 +484,19 @@ onUnmounted(() => {
                       </button>
                     </div>
                     <div class="replica-actions-inline">
+                      <button
+                        class="btn-icon"
+                        @click="handleViewReplicaLogs(replica)"
+                        title="查看副本日志"
+                        :aria-label="`查看 ${replica.name} 日志`"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                          <polyline points="14 2 14 8 20 8"/>
+                          <line x1="16" y1="13" x2="8" y2="13"/>
+                          <line x1="16" y1="17" x2="8" y2="17"/>
+                        </svg>
+                      </button>
                       <button 
                         class="btn-icon" 
                         @click="handleEnterContainer(replica)"

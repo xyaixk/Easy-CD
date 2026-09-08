@@ -8,11 +8,11 @@ import com.easy.cd.mapper.ReplicaStatusMapper;
 import com.easy.cd.mapper.ServiceMapper;
 import com.easy.cd.monitor.discovery.NodeDiscoveryService;
 import com.easy.cd.monitor.discovery.NodeDiscoveryService.NodeInfo;
+import com.easy.cd.service.ReplicaStatusSyncService;
 import com.easy.cd.util.SshExecutor;
 import com.easy.cd.util.SshExecutor.SshResult;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -20,6 +20,7 @@ import java.util.Collections;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.startsWith;
@@ -31,7 +32,7 @@ import static org.mockito.Mockito.when;
 class ReplicaStatusRefreshTaskTest {
 
     @Test
-    void storesContainerNodeIpResolvedFromSwarmHostname() {
+    void refreshServiceStoresCurrentReplacementAfterContainerRestart() {
         EnvironmentMapper environmentMapper = mock(EnvironmentMapper.class);
         ServiceMapper serviceMapper = mock(ServiceMapper.class);
         ReplicaStatusMapper replicaStatusMapper = mock(ReplicaStatusMapper.class);
@@ -39,26 +40,29 @@ class ReplicaStatusRefreshTaskTest {
         SshExecutor sshExecutor = mock(SshExecutor.class);
         NodeDiscoveryService nodeDiscoveryService = mock(NodeDiscoveryService.class);
 
-        ReplicaStatusRefreshTask task = new ReplicaStatusRefreshTask();
-        ReflectionTestUtils.setField(task, "environmentMapper", environmentMapper);
-        ReflectionTestUtils.setField(task, "serviceMapper", serviceMapper);
-        ReflectionTestUtils.setField(task, "replicaStatusMapper", replicaStatusMapper);
-        ReflectionTestUtils.setField(task, "transactionTemplate", transactionTemplate);
-        ReflectionTestUtils.setField(task, "sshExecutor", sshExecutor);
-        ReflectionTestUtils.setField(task, "nodeDiscoveryService", nodeDiscoveryService);
+        ReplicaStatusSyncService syncService = new ReplicaStatusSyncService(
+                environmentMapper,
+                serviceMapper,
+                replicaStatusMapper,
+                transactionTemplate,
+                sshExecutor,
+                nodeDiscoveryService);
 
         Environment environment = environment();
         AppService service = service();
-        when(environmentMapper.selectList(null)).thenReturn(Collections.singletonList(environment));
-        when(serviceMapper.selectList(any())).thenReturn(Collections.singletonList(service));
+        when(serviceMapper.selectById(9L)).thenReturn(service);
+        when(environmentMapper.selectById(1L)).thenReturn(environment);
         when(sshExecutor.executeCommandWithFailover(anyList(), startsWith("docker service ps")))
                 .thenReturn(new SshResult(0,
-                        "{\"ID\":\"task123456789\",\"Name\":\"api.1\","
+                        "{\"ID\":\"oldtask123456\",\"Name\":\"api.1\","
+                                + "\"Node\":\"swarm-worker-64\",\"DesiredState\":\"Shutdown\","
+                                + "\"CurrentState\":\"Shutdown 2 seconds ago\",\"Error\":\"\"}\n"
+                                + "{\"ID\":\"newtask123456\",\"Name\":\"api.1\","
                                 + "\"Node\":\"swarm-worker-64\",\"DesiredState\":\"Running\","
                                 + "\"CurrentState\":\"Running 8 minutes ago\",\"Error\":\"\"}\n",
                         ""));
         when(sshExecutor.executeCommandWithFailover(anyList(), startsWith("docker inspect")))
-                .thenReturn(new SshResult(0, "task123456789 4a4ef7e01f3b1234567890\n", ""));
+                .thenReturn(new SshResult(0, "newtask123456 4a4ef7e01f3b1234567890\n", ""));
         when(nodeDiscoveryService.discover(environment)).thenReturn(
                 Collections.singletonList(node("swarm-worker-64", "10.10.0.64")));
         doAnswer(invocation -> {
@@ -68,14 +72,25 @@ class ReplicaStatusRefreshTaskTest {
             return null;
         }).when(transactionTemplate).executeWithoutResult(any());
 
-        task.refreshReplicaStatus();
+        assertTrue(syncService.refreshService(9L));
 
         ArgumentCaptor<ReplicaStatus> statusCaptor = ArgumentCaptor.forClass(ReplicaStatus.class);
         verify(replicaStatusMapper).insert(statusCaptor.capture());
         ReplicaStatus status = statusCaptor.getValue();
+        assertEquals("newtask123456", status.getReplicaId());
         assertEquals("swarm-worker-64", status.getNodeName());
         assertEquals("10.10.0.64", status.getNodeIp());
         assertEquals("4a4ef7e01f3b", status.getContainerId());
+        assertEquals(1, status.getRestartCount());
+    }
+
+    @Test
+    void scheduledRefreshDelegatesToSyncService() {
+        ReplicaStatusSyncService syncService = mock(ReplicaStatusSyncService.class);
+
+        new ReplicaStatusRefreshTask(syncService).refreshReplicaStatus();
+
+        verify(syncService).refreshAllReplicaStatus();
     }
 
     private Environment environment() {

@@ -14,8 +14,10 @@ import com.easy.cd.dto.ServiceUpdateDTO;
 import com.easy.cd.entity.*;
 import com.easy.cd.exception.BusinessException;
 import com.easy.cd.mapper.*;
+import com.easy.cd.service.ReplicaStatusSyncService;
 import com.easy.cd.service.ServiceGroupService;
 import com.easy.cd.service.ServiceManagementService;
+import com.easy.cd.service.ServiceStatusSyncService;
 import com.easy.cd.vo.ServiceDetailVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,6 +54,8 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
     private final DeployService deployService;
     private final DeployTaskQueueService deployTaskQueueService;
     private final ServiceGroupService serviceGroupService;
+    private final ServiceStatusSyncService serviceStatusSyncService;
+    private final ReplicaStatusSyncService replicaStatusSyncService;
 
     /** 自身代理：队列 worker 线程内调用 doXxx 时保证 @Transactional 生效 */
     @Autowired
@@ -107,6 +111,11 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         
         // 步骤5: 保存服务状态
         ServiceStatus serviceStatus = saveServiceStatus(service.getId(), deployResult);
+        if (serviceStatusSyncService.refreshService(service.getId())) {
+            serviceStatus = serviceStatusMapper.selectOne(
+                    new LambdaQueryWrapper<ServiceStatus>()
+                            .eq(ServiceStatus::getServiceId, service.getId()));
+        }
         
         log.info("服务创建成功: {}, ID: {}", service.getName(), service.getId());
         return buildServiceDetailVO(service, serviceStatus);
@@ -500,6 +509,9 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         if (service == null) {
             throw new BusinessException("服务不存在");
         }
+
+        // 接口查询前直接同步 Docker Swarm 当前 task，避免依赖监控定时任务的缓存。
+        replicaStatusSyncService.refreshService(id);
         
         // 从 replica_status 表查询副本信息（只查询活跃的副本）
         List<ReplicaStatus> replicaStatusList = replicaStatusMapper.selectList(

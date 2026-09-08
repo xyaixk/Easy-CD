@@ -293,7 +293,7 @@ watch(() => props.visible, async (visible) => {
   if (visible) {
     isFollowing.value = false
     wrapLines.value = false
-    selectedTaskId.value = ''
+    selectedTaskId.value = String(props.replica?.taskId || props.replica?.id || '')
     expiredSelection.value = null
     instancesError.value = ''
     isLoading.value = true

@@ -3,6 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import toast from '@/utils/toast'
 import { listTasks, getTask } from '@/api/task'
 import {
+  createTaskCompletionTracker,
   getTaskStatusLabel,
   getTaskTypeLabel,
   isActiveTask
@@ -44,8 +45,7 @@ const expandedId = ref(null)
 const expandedLog = ref('')
 const logRef = ref(null)
 
-// 上一轮各任务状态，用于检测活跃→终态的变化
-let prevStatusMap = new Map()
+const completionTracker = createTaskCompletionTracker()
 
 // 轮询
 let pollTimer = null
@@ -128,21 +128,17 @@ const loadOlder = async () => {
   }
 }
 
-// 检测任务从活跃转为终态：toast + 通知父组件刷新服务列表
+// 检测任务从活跃转为终态：toast + 通知父组件刷新对应服务卡片
 const detectFinished = (newTasks) => {
-  newTasks.forEach(task => {
-    const prev = prevStatusMap.get(task.id)
-    if (prev && isActiveTask({ status: prev }) && !isActiveTask(task)) {
-      const label = `${getTaskTypeLabel(task.taskType)}「${task.serviceName}」`
-      if (task.status === 'SUCCESS') {
-        toast.success(`任务${label}执行成功`)
-      } else {
-        toast.error(`任务${label}执行失败：${task.errorMsg || '未知错误'}`)
-      }
-      emit('task-finished', task)
+  completionTracker.update(newTasks).forEach(task => {
+    const label = `${getTaskTypeLabel(task.taskType)}「${task.serviceName}」`
+    if (task.status === 'SUCCESS') {
+      toast.success(`任务${label}执行成功`)
+    } else {
+      toast.error(`任务${label}执行失败：${task.errorMsg || '未知错误'}`)
     }
+    emit('task-finished', task)
   })
-  prevStatusMap = new Map(newTasks.map(t => [t.id, t.status]))
 }
 
 // 拉取展开任务的完整日志并滚动到底部
@@ -206,7 +202,12 @@ const refresh = async () => {
   schedulePolling()
 }
 
-defineExpose({ refresh })
+const trackTask = (task) => {
+  completionTracker.track(task)
+  schedulePolling()
+}
+
+defineExpose({ refresh, trackTask })
 
 watch(() => props.visible, async (visible) => {
   if (visible) {
@@ -222,7 +223,7 @@ watch(() => props.environmentId, async () => {
   hasMore.value = false
   expandedId.value = null
   expandedLog.value = ''
-  prevStatusMap = new Map()
+  completionTracker.reset()
   await fetchTasks()
   schedulePolling()
 })

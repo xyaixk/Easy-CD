@@ -23,6 +23,40 @@ export const getServiceTaskKey = serviceId =>
 export const isActiveTask = task =>
   Boolean(task && ACTIVE_TASK_STATUS_SET.has(task.status))
 
+const getTaskKey = task => task?.id == null ? null : String(task.id)
+
+export const createTaskCompletionTracker = () => {
+  const activeTaskIds = new Set()
+
+  return {
+    track(task) {
+      const taskKey = getTaskKey(task)
+      if (taskKey != null && isActiveTask(task)) activeTaskIds.add(taskKey)
+    },
+
+    update(tasks = []) {
+      const finishedTasks = []
+
+      for (const task of tasks) {
+        const taskKey = getTaskKey(task)
+        if (taskKey == null) continue
+
+        if (isActiveTask(task)) {
+          activeTaskIds.add(taskKey)
+        } else if (activeTaskIds.delete(taskKey)) {
+          finishedTasks.push(task)
+        }
+      }
+
+      return finishedTasks
+    },
+
+    reset() {
+      activeTaskIds.clear()
+    }
+  }
+}
+
 export const getTaskTypeLabel = type => TASK_TYPE_LABELS[type] || type || '任务'
 
 export const getTaskStatusLabel = status => TASK_STATUS_LABELS[status] || status || ''

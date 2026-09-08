@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildBlockingTaskMap,
+  createTaskCompletionTracker,
   getServiceTaskKey,
   getTaskStatusLabel,
   getTaskTypeLabel,
@@ -49,4 +50,28 @@ test('任务标签提供中文文案并保留未知值', () => {
   assert.equal(getTaskStatusLabel('RUNNING'), '执行中')
   assert.equal(getTaskTypeLabel('CUSTOM'), 'CUSTOM')
   assert.equal(getTaskStatusLabel('CUSTOM'), 'CUSTOM')
+})
+
+test('任务完成跟踪器支持首次查询即进入终态的本地任务', () => {
+  const tracker = createTaskCompletionTracker()
+  const pendingTask = Object.freeze({ id: 21, status: 'PENDING' })
+  const finishedTask = Object.freeze({ id: 21, status: 'SUCCESS' })
+
+  tracker.track(pendingTask)
+
+  assert.deepEqual(tracker.update([finishedTask]), [finishedTask])
+  assert.deepEqual(tracker.update([finishedTask]), [])
+})
+
+test('任务完成跟踪器记录远端活跃任务并可重置', () => {
+  const tracker = createTaskCompletionTracker()
+  const runningTask = Object.freeze({ id: '31', status: 'RUNNING' })
+  const failedTask = Object.freeze({ id: 31, status: 'FAILED' })
+
+  assert.deepEqual(tracker.update([runningTask]), [])
+  assert.deepEqual(tracker.update([failedTask]), [failedTask])
+
+  tracker.track(runningTask)
+  tracker.reset()
+  assert.deepEqual(tracker.update([failedTask]), [])
 })
