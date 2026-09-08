@@ -1,9 +1,23 @@
 <script setup>
-import { ref, watch, onUnmounted, nextTick } from 'vue'
+import { computed, ref, watch, onUnmounted, nextTick } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
-import { getServiceLogsWsUrl } from '@/api/service'
+import { getServiceLogInstances, getServiceLogsWsUrl } from '@/api/service'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
+import {
+  canFollowLogTarget,
+  formatServiceLogInstanceLabel,
+  measureLogColumns,
+  shortTaskId,
+  sortServiceLogInstances
+} from '@/utils/serviceLogs'
+
+const LOG_TAIL = 500
+const INSTANCE_REFRESH_INTERVAL = 5000
+const MAX_BUFFER_CHARS = 5 * 1024 * 1024
+const SINGLE_LINE_COLUMN_STEP = 64
+const MAX_SINGLE_LINE_COLUMNS = 4096
 
 const props = defineProps({
   visible: {
@@ -20,26 +34,86 @@ const props = defineProps({
   }
 })
 
+useBodyScrollLock(() => props.visible)
+
 const emit = defineEmits(['update:visible'])
 
-// 日志缓冲（解码后的原始文本块，用于下载和行数统计；渲染由 xterm 负责）
 let logChunks = []
 let bufferedChars = 0
-const MAX_BUFFER_CHARS = 5 * 1024 * 1024 // 缓冲上限 5M 字符，超出丢最旧块
 const lineCount = ref(0)
 const isLoading = ref(false)
 const isFollowing = ref(false)
 const autoScroll = ref(true)
+const wrapLines = ref(false)
 
-// WebSocket 连接（复用终端通道的 logs 模式，服务端推二进制字节流）
+const logInstances = ref([])
+const selectedTaskId = ref('')
+const expiredSelection = ref(null)
+const instancesLoading = ref(false)
+const instancesError = ref('')
+let instanceRefreshTimer = null
+
+const runningCount = computed(() => logInstances.value.filter(item => item.running).length)
+const selectedInstance = computed(() =>
+  logInstances.value.find(item => item.taskId === selectedTaskId.value)
+  || (expiredSelection.value?.taskId === selectedTaskId.value ? expiredSelection.value : null)
+)
+const followAvailable = computed(() =>
+  canFollowLogTarget(selectedTaskId.value, logInstances.value)
+)
+
 let ws = null
-let decoder = null
 
-// xterm 终端（只读，仅用于日志渲染）
 const termRef = ref(null)
 let term = null
 let fitAddon = null
 let resizeObserver = null
+let terminalScreen = null
+let currentLogColumn = 0
+let maxLogColumns = 0
+
+const syncHorizontalScroll = () => {
+  if (!termRef.value) return
+  terminalScreen ||= termRef.value.querySelector('.xterm-screen')
+  if (!terminalScreen) return
+
+  const scrollLeft = wrapLines.value ? 0 : termRef.value.scrollLeft
+  term?.element?.style.setProperty('--log-content-width', `${terminalScreen.offsetWidth}px`)
+  terminalScreen.style.setProperty('--log-horizontal-offset', `${-scrollLeft}px`)
+}
+
+const fitTerminal = () => {
+  if (!term || !fitAddon) return
+  const dimensions = fitAddon.proposeDimensions()
+  if (!dimensions) return
+
+  let columns = dimensions.cols
+  if (!wrapLines.value && maxLogColumns > columns) {
+    columns = Math.min(
+      MAX_SINGLE_LINE_COLUMNS,
+      Math.ceil(maxLogColumns / SINGLE_LINE_COLUMN_STEP) * SINGLE_LINE_COLUMN_STEP
+    )
+  }
+  if (term.cols !== columns || term.rows !== dimensions.rows) {
+    term.resize(columns, dimensions.rows)
+  }
+  if (wrapLines.value && termRef.value) termRef.value.scrollLeft = 0
+  syncHorizontalScroll()
+}
+
+const trackLogWidth = (text) => {
+  const measurement = measureLogColumns(text, currentLogColumn, maxLogColumns)
+  currentLogColumn = measurement.currentColumn
+  maxLogColumns = measurement.maxColumns
+  if (!wrapLines.value && term && maxLogColumns > term.cols) fitTerminal()
+}
+
+const writeTerminalText = (text) => {
+  if (!term || !text) return
+  trackLogWidth(text)
+  term.write(text)
+  if (autoScroll.value) term.scrollToBottom()
+}
 
 const initTerminal = () => {
   if (term) return
@@ -59,12 +133,12 @@ const initTerminal = () => {
   fitAddon = new FitAddon()
   term.loadAddon(fitAddon)
   term.open(termRef.value)
-  fitAddon.fit()
+  terminalScreen = termRef.value.querySelector('.xterm-screen')
+  fitTerminal()
 
-  // 容器尺寸变化自适应
   resizeObserver = new ResizeObserver(() => {
     if (!fitAddon) return
-    try { fitAddon.fit() } catch (_) {}
+    try { fitTerminal() } catch (_) {}
   })
   resizeObserver.observe(termRef.value)
 }
@@ -73,79 +147,98 @@ const teardownTerminal = () => {
   if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null }
   if (term) { term.dispose(); term = null }
   fitAddon = null
+  terminalScreen = null
 }
 
-// 写入灰色状态提示（ANSI 暗色）
 const writeHint = (text) => {
-  if (!term) return
-  term.writeln(`\x1b[90m${text}\x1b[0m`)
-  if (autoScroll.value) term.scrollToBottom()
+  writeTerminalText(`\x1b[90m${text}\x1b[0m\r\n`)
 }
 
-// 监听对话框显示状态
-watch(() => props.visible, async (val) => {
-  if (val) {
-    document.body.style.overflow = 'hidden'
-    await nextTick()
-    initTerminal()
-    loadLogs()
-  } else {
-    document.body.style.overflow = ''
-    closeLogs()
-    teardownTerminal()
-  }
-})
-
-// 加载日志（建立 WebSocket 连接）
-const loadLogs = () => {
+const resetLogOutput = () => {
   logChunks = []
   bufferedChars = 0
   lineCount.value = 0
-  if (term) term.reset()
+  currentLogColumn = 0
+  maxLogColumns = 0
+  if (term) {
+    term.reset()
+    fitTerminal()
+  }
+  if (termRef.value) termRef.value.scrollLeft = 0
+  syncHorizontalScroll()
+}
+
+const appendLogText = (text) => {
+  logChunks.push(text)
+  bufferedChars += text.length
+  lineCount.value += (text.match(/\n/g) || []).length
+  while (bufferedChars > MAX_BUFFER_CHARS && logChunks.length > 1) {
+    bufferedChars -= logChunks.shift().length
+  }
+}
+
+const closeLogs = () => {
+  if (!ws) return
+  const connection = ws
+  ws = null
+  connection.onopen = null
+  connection.onmessage = null
+  connection.onclose = null
+  connection.onerror = null
+  try { connection.close() } catch (_) {}
+}
+
+const loadLogs = ({ reset = true } = {}) => {
+  if (reset) resetLogOutput()
   isLoading.value = true
-  decoder = new TextDecoder() // 每次连接新建，stream 模式处理跨帧多字节字符
-  
+  const connectionDecoder = new TextDecoder()
+
   try {
-    ws = new WebSocket(getServiceLogsWsUrl(props.serviceId, 500, isFollowing.value))
-    ws.binaryType = 'arraybuffer'
-    
-    ws.onmessage = (event) => {
+    const follow = isFollowing.value
+    const tail = follow ? 0 : LOG_TAIL
+    const connection = new WebSocket(getServiceLogsWsUrl(
+      props.serviceId,
+      tail,
+      follow,
+      selectedTaskId.value || null
+    ))
+    ws = connection
+    connection.binaryType = 'arraybuffer'
+
+    connection.onopen = () => {
+      if (ws !== connection) return
       isLoading.value = false
-      if (!term) return
-      
+      if (follow) writeHint('--- 实时日志已连接，仅追加新输出 ---')
+    }
+
+    connection.onmessage = (event) => {
+      if (ws !== connection || !term) return
+      isLoading.value = false
+
       let text
       if (typeof event.data === 'string') {
-        // 文本帧：服务端状态提示（已带 ANSI 样式）
         text = event.data
-        term.write(text)
       } else {
-        // 二进制帧：命令原始输出字节流
-        term.write(new Uint8Array(event.data))
-        text = decoder.decode(event.data, { stream: true })
+        text = connectionDecoder.decode(event.data, { stream: true })
       }
-      if (autoScroll.value) term.scrollToBottom()
-      
-      // 缓冲文本用于下载/行数统计，超出上限丢最旧块
-      logChunks.push(text)
-      bufferedChars += text.length
-      lineCount.value += (text.match(/\n/g) || []).length
-      while (bufferedChars > MAX_BUFFER_CHARS && logChunks.length > 1) {
-        bufferedChars -= logChunks.shift().length
-      }
+      writeTerminalText(text)
+      appendLogText(text)
     }
-    
-    ws.onclose = () => {
-      // 服务端读完/断开会主动关连接；follow 模式的断开提示由服务端文本帧给出
+
+    connection.onclose = () => {
+      if (ws !== connection) return
       isLoading.value = false
+      if (follow) isFollowing.value = false
       ws = null
     }
-    
-    ws.onerror = (error) => {
+
+    connection.onerror = (error) => {
+      if (ws !== connection) return
       console.error('日志流连接错误:', error)
       isLoading.value = false
+      if (follow) isFollowing.value = false
       writeHint('--- 日志流连接错误 ---')
     }
-    
   } catch (error) {
     console.error('加载日志失败:', error)
     writeHint('加载日志失败: ' + error.message)
@@ -153,42 +246,111 @@ const loadLogs = () => {
   }
 }
 
-// 滚动到底部
+const refreshLogInstances = async () => {
+  if (instancesLoading.value) return
+  instancesLoading.value = true
+  const previousSelection = selectedInstance.value
+  try {
+    const instances = sortServiceLogInstances(await getServiceLogInstances(props.serviceId))
+    logInstances.value = instances
+    instancesError.value = ''
+
+    if (selectedTaskId.value && !instances.some(item => item.taskId === selectedTaskId.value)) {
+      expiredSelection.value = previousSelection || {
+        taskId: selectedTaskId.value,
+        name: `实例 ${shortTaskId(selectedTaskId.value)}`,
+        running: false
+      }
+    } else {
+      expiredSelection.value = null
+    }
+
+    if (isFollowing.value && !followAvailable.value) {
+      closeLogs()
+      isFollowing.value = false
+      writeHint('--- 当前实例已停止或不可追溯，实时推送已结束 ---')
+    }
+  } catch (error) {
+    console.error('加载日志实例失败:', error)
+    instancesError.value = error.message || '实例列表加载失败'
+  } finally {
+    instancesLoading.value = false
+  }
+}
+
+const startInstanceRefresh = () => {
+  stopInstanceRefresh()
+  instanceRefreshTimer = setInterval(refreshLogInstances, INSTANCE_REFRESH_INTERVAL)
+}
+
+const stopInstanceRefresh = () => {
+  if (!instanceRefreshTimer) return
+  clearInterval(instanceRefreshTimer)
+  instanceRefreshTimer = null
+}
+
+watch(() => props.visible, async (visible) => {
+  if (visible) {
+    isFollowing.value = false
+    wrapLines.value = false
+    selectedTaskId.value = ''
+    expiredSelection.value = null
+    instancesError.value = ''
+    isLoading.value = true
+    await nextTick()
+    initTerminal()
+    await refreshLogInstances()
+    if (!props.visible) return
+    loadLogs()
+    startInstanceRefresh()
+  } else {
+    stopInstanceRefresh()
+    closeLogs()
+    isFollowing.value = false
+    isLoading.value = false
+    teardownTerminal()
+  }
+})
+
+const handleTargetChange = () => {
+  closeLogs()
+  isFollowing.value = false
+  if (!selectedTaskId.value || logInstances.value.some(item => item.taskId === selectedTaskId.value)) {
+    expiredSelection.value = null
+  }
+  loadLogs()
+}
+
 const scrollToBottom = () => {
   if (term) term.scrollToBottom()
 }
 
-// 切换实时推送
 const toggleFollow = () => {
   if (isFollowing.value) {
-    // 从实时切换到静态:关闭连接,保留当前日志
     closeLogs()
     isFollowing.value = false
-  } else {
-    // 从静态切换到实时:重新加载日志并开启实时推送
-    isFollowing.value = true
-    closeLogs()
-    loadLogs()
+    return
   }
+  if (!followAvailable.value) return
+
+  isFollowing.value = true
+  closeLogs()
+  loadLogs({ reset: false })
 }
 
-// 切换自动滚动
 const toggleAutoScroll = () => {
   autoScroll.value = !autoScroll.value
-  if (autoScroll.value) {
-    scrollToBottom()
-  }
+  if (autoScroll.value) scrollToBottom()
 }
 
-// 清空日志
-const clearLogs = () => {
-  logChunks = []
-  bufferedChars = 0
-  lineCount.value = 0
-  if (term) term.reset()
+const toggleLineWrap = () => {
+  wrapLines.value = !wrapLines.value
+  try { fitTerminal() } catch (_) {}
+  if (autoScroll.value) scrollToBottom()
 }
 
-// 下载日志（去除 ANSI 颜色控制码，统一换行符）
+const clearLogs = () => resetLogOutput()
+
 const downloadLogs = () => {
   const content = logChunks.join('')
     .replace(/\x1b\[[0-9;]*m/g, '')
@@ -198,28 +360,19 @@ const downloadLogs = () => {
   const a = document.createElement('a')
   a.href = url
   const serviceName = props.replica?.name || 'service'
-  a.download = `${serviceName}-logs-${Date.now()}.txt`
+  const targetName = selectedInstance.value?.name || 'running'
+  const safeName = `${serviceName}-${targetName}`.replace(/[\\/:*?"<>|]/g, '-')
+  a.download = `${safeName}-logs-${Date.now()}.txt`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
 }
 
-// 关闭日志流
-const closeLogs = () => {
-  if (ws) {
-    ws.onclose = null
-    try { ws.close() } catch (_) {}
-    ws = null
-  }
-}
-
-const handleClose = () => {
-  emit('update:visible', false)
-}
+const handleClose = () => emit('update:visible', false)
 
 onUnmounted(() => {
-  document.body.style.overflow = ''
+  stopInstanceRefresh()
   closeLogs()
   teardownTerminal()
 })
@@ -255,17 +408,88 @@ onUnmounted(() => {
           </div>
       
           <div class="dialog-toolbar">
+            <div class="instance-selector">
+              <label for="service-log-instance">实例</label>
+              <select
+                id="service-log-instance"
+                v-model="selectedTaskId"
+                :disabled="instancesLoading && !logInstances.length"
+                @change="handleTargetChange"
+              >
+                <option value="">全部运行中实例（{{ runningCount }}）</option>
+                <option
+                  v-if="expiredSelection"
+                  :value="expiredSelection.taskId"
+                  disabled
+                >
+                  {{ expiredSelection.name }} · 已不可追溯 · {{ shortTaskId(expiredSelection.taskId) }}
+                </option>
+                <option
+                  v-for="instance in logInstances"
+                  :key="instance.taskId"
+                  :value="instance.taskId"
+                >
+                  {{ formatServiceLogInstanceLabel(instance) }}
+                </option>
+              </select>
+              <button
+                class="toolbar-btn refresh-instances"
+                type="button"
+                :disabled="instancesLoading"
+                @click="refreshLogInstances"
+                title="刷新实例列表"
+                aria-label="刷新实例列表"
+              >
+                <svg
+                  class="refresh-icon"
+                  :class="{ spinning: instancesLoading }"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 12a8 8 0 1 1-2.34-5.66L20 8"/>
+                  <polyline points="20 3 20 8 15 8"/>
+                </svg>
+              </button>
+            </div>
+
+            <span v-if="instancesError" class="instance-error" :title="instancesError">
+              实例列表加载失败
+            </span>
+
             <button 
               class="toolbar-btn"
               :class="{ active: isFollowing }"
+              :disabled="!followAvailable"
               @click="toggleFollow"
-              title="实时推送"
+              :title="followAvailable ? '实时推送' : '历史实例仅支持静态日志'"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
                 <polyline points="17 6 23 6 23 12"/>
               </svg>
               {{ isFollowing ? '实时' : '静态' }}
+            </button>
+
+            <button
+              class="toolbar-btn"
+              :class="{ active: wrapLines }"
+              type="button"
+              @click="toggleLineWrap"
+              :title="wrapLines ? '切换为单行展示' : '切换为自动换行'"
+              :aria-pressed="wrapLines"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-3M4 18h6"/>
+                <polyline points="17 15 14 18 17 21"/>
+              </svg>
+              {{ wrapLines ? '自动换行' : '单行' }}
             </button>
             
             <button 
@@ -318,7 +542,12 @@ onUnmounted(() => {
             </div>
             
             <div class="terminal-body">
-              <div ref="termRef" class="terminal-container"></div>
+              <div
+                ref="termRef"
+                class="terminal-container"
+                :class="{ 'wrap-lines': wrapLines }"
+                @scroll.passive="syncHorizontalScroll"
+              ></div>
             </div>
           </div>
         </div>
@@ -419,6 +648,70 @@ onUnmounted(() => {
   background: var(--bg-primary);
 }
 
+.instance-selector {
+  min-width: 320px;
+  max-width: 660px;
+  flex: 1 1 440px;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.instance-selector label {
+  flex: none;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.instance-selector select {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  padding: 0 2rem 0 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.instance-selector select:focus {
+  border-color: var(--primary-color);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--primary-light);
+}
+
+.refresh-instances {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  justify-content: center;
+}
+
+.refresh-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  transform-origin: center;
+}
+
+.refresh-icon.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+.instance-error {
+  max-width: 130px;
+  overflow: hidden;
+  color: var(--danger-color, #dc2626);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbar-btn {
   padding: 0.5rem 1rem;
   border-radius: 8px;
@@ -444,6 +737,17 @@ onUnmounted(() => {
   border-color: var(--primary-color);
   background: var(--primary-color);
   color: white;
+}
+
+.toolbar-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.toolbar-btn:disabled:hover {
+  border-color: var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
 .toolbar-info {
@@ -497,6 +801,50 @@ onUnmounted(() => {
 .terminal-container {
   width: 100%;
   height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-color: #555 #2d2d2d;
+  scrollbar-width: thin;
+}
+
+.terminal-container.wrap-lines {
+  overflow-x: hidden;
+}
+
+.terminal-container:not(.wrap-lines) :deep(.xterm) {
+  position: sticky;
+  left: 0;
+}
+
+.terminal-container:not(.wrap-lines) :deep(.xterm::after) {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--log-content-width, 100%);
+  height: 1px;
+  pointer-events: none;
+}
+
+.terminal-container :deep(.xterm-screen) {
+  translate: var(--log-horizontal-offset, 0) 0;
+}
+
+.terminal-container::-webkit-scrollbar {
+  height: 8px;
+}
+
+.terminal-container::-webkit-scrollbar-track {
+  background: #2d2d2d;
+}
+
+.terminal-container::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 4px;
+}
+
+.terminal-container::-webkit-scrollbar-thumb:hover {
+  background: #666;
 }
 
 /* xterm 自身滚动条深色化 */
@@ -571,5 +919,21 @@ onUnmounted(() => {
 .dialog-fade-leave-to .dialog-container {
   transform: scale(0.9);
   opacity: 0;
+}
+
+@media (max-width: 760px) {
+  .dialog-toolbar {
+    padding: 0.75rem 1rem;
+  }
+
+  .instance-selector {
+    min-width: 100%;
+    max-width: none;
+    flex-basis: 100%;
+  }
+
+  .toolbar-info {
+    margin-left: 0;
+  }
 }
 </style>

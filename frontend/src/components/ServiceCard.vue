@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import ServiceActionMenu from './ServiceActionMenu.vue'
 import SparkLine from './monitor/SparkLine.vue'
+import { getTaskStatusLabel, getTaskTypeLabel } from '@/utils/deployTask'
 
 const props = defineProps({
   service: {
@@ -11,7 +12,17 @@ const props = defineProps({
   viewDisabled: {
     type: Boolean,
     default: false
+  },
+  blockingTask: {
+    type: Object,
+    default: null
   }
+})
+
+const isReadOnly = computed(() => Boolean(props.blockingTask))
+const blockingTaskLabel = computed(() => {
+  if (!props.blockingTask) return ''
+  return `${getTaskTypeLabel(props.blockingTask.taskType)}任务${getTaskStatusLabel(props.blockingTask.status)}`
 })
 
 // 回退：后端 sparkline 未接入前使用本地生成的伪时序（真实指标接入后 service.cpuSpark/memSpark 优先）
@@ -133,7 +144,12 @@ const descriptionText = computed(() => {
 </script>
 
 <template>
-  <div class="service-card" @click="handleCardView">
+  <div
+    class="service-card"
+    :class="{ 'is-blocked': isReadOnly }"
+    :aria-busy="isReadOnly"
+    @click="handleCardView"
+  >
     <div class="service-header">
       <h3 class="service-name" :title="service.name">{{ service.name }}</h3>
       <div class="service-meta-row">
@@ -189,6 +205,7 @@ const descriptionText = computed(() => {
       <div class="service-actions" @click.stop>
         <ServiceActionMenu
           :service="service"
+          :read-only="isReadOnly"
           @update="(payload) => emit('update', payload)"
           @rollback="(payload) => emit('rollback', payload)"
           @restart="emit('restart', service)"
@@ -201,11 +218,28 @@ const descriptionText = computed(() => {
         />
       </div>
     </div>
+
+    <template v-if="blockingTask">
+      <div class="service-blocking-overlay" aria-hidden="true"></div>
+      <div
+        class="service-blocking-notice"
+        :class="blockingTask.status.toLowerCase()"
+        role="status"
+        aria-live="polite"
+      >
+        <span class="blocking-spinner" aria-hidden="true"></span>
+        <span class="blocking-copy">
+          <strong>{{ blockingTaskLabel }}</strong>
+          <small>可查看详情和日志</small>
+        </span>
+      </div>
+    </template>
   </div>
 </template>
 
 <style scoped>
 .service-card {
+  position: relative;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 12px;
@@ -217,6 +251,73 @@ const descriptionText = computed(() => {
 .service-card:hover {
   box-shadow: var(--shadow-xl);
   border-color: var(--primary-color);
+}
+
+.service-card.is-blocked,
+.service-card.is-blocked:hover {
+  border-color: color-mix(in srgb, var(--warning-color) 65%, var(--border-color));
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--warning-color) 12%, transparent);
+}
+
+.service-blocking-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-secondary) 68%, transparent);
+  border-radius: inherit;
+  backdrop-filter: blur(1.5px) saturate(0.7);
+}
+
+.service-blocking-notice {
+  --task-color: var(--warning-color);
+  position: absolute;
+  top: 4.45rem;
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: max-content;
+  padding: 0.45rem 0.7rem;
+  pointer-events: none;
+  color: var(--task-color);
+  background: color-mix(in srgb, var(--bg-secondary) 92%, var(--task-color));
+  border: 1px solid color-mix(in srgb, var(--task-color) 45%, var(--border-color));
+  border-radius: 9px;
+  box-shadow: var(--shadow-md);
+  transform: translateX(-50%);
+}
+
+.service-blocking-notice.pending {
+  --task-color: var(--text-secondary);
+}
+
+.blocking-spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 2px solid color-mix(in srgb, var(--task-color) 28%, transparent);
+  border-top-color: var(--task-color);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+
+.blocking-copy {
+  display: grid;
+  gap: 0.05rem;
+  line-height: 1.2;
+}
+
+.blocking-copy strong {
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.blocking-copy small {
+  color: var(--text-secondary);
+  font-size: 0.66rem;
+  font-weight: 500;
 }
 
 .service-header {
@@ -264,6 +365,7 @@ const descriptionText = computed(() => {
 
 .metrics-section {
   position: relative;
+  z-index: 3;
   padding: 0.55rem 0.85rem;
   background: var(--bg-primary);
   border-radius: 8px;
@@ -461,8 +563,35 @@ const descriptionText = computed(() => {
   border-top: 1px solid var(--border-color);
 }
 
+.service-actions {
+  position: relative;
+  z-index: 3;
+}
+
 .last-deploy {
   font-size: 0.8rem;
   color: var(--text-tertiary);
+}
+
+@media (max-width: 480px) {
+  .service-blocking-notice {
+    left: 1rem;
+    right: 1rem;
+    min-width: 0;
+    justify-content: center;
+    transform: none;
+  }
+
+  .blocking-copy {
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot,
+  .status-dot.spinning,
+  .blocking-spinner {
+    animation: none;
+  }
 }
 </style>

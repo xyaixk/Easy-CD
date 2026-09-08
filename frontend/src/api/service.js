@@ -107,6 +107,16 @@ export function getServiceReplicas(id) {
 }
 
 /**
+ * 获取服务在 Docker Swarm 中仍可追溯的日志实例
+ */
+export function getServiceLogInstances(id) {
+  return request({
+    url: `/service/${id}/log-instances`,
+    method: 'get'
+  })
+}
+
+/**
  * 获取服务镜像的所有可用版本（用于回滚）
  */
 export function getAvailableVersions(id) {
@@ -121,9 +131,10 @@ export function getAvailableVersions(id) {
  * @param {Number} serviceId 服务ID
  * @param {Number} tail 获取最后N行
  * @param {Boolean} follow 是否持续推送
+ * @param {String|null} taskId 指定 Docker Swarm task；为空时聚合当前实例
  * @returns {String} WebSocket URL
  */
-export function getServiceLogsWsUrl(serviceId, tail = 500, follow = false) {
+export function getServiceLogsWsUrl(serviceId, tail = 500, follow = false, taskId = null) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const params = new URLSearchParams({
     mode: 'logs',
@@ -131,6 +142,7 @@ export function getServiceLogsWsUrl(serviceId, tail = 500, follow = false) {
     tail: String(tail),
     follow: String(follow)
   })
+  if (taskId) params.set('taskId', taskId)
   const token = getToken()
   if (token) params.set('token', token)
   return `${proto}//${location.host}/api/terminal?${params.toString()}`

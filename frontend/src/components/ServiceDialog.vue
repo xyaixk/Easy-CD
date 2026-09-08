@@ -1,6 +1,7 @@
 <script setup>
-import { ref, watch, onUnmounted, computed, reactive } from 'vue'
+import { ref, watch, computed, reactive } from 'vue'
 import EnvClipboardActions from './EnvClipboardActions.vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 import { DOCKER_BUILT_IN_KEYS as BUILT_IN_KEYS } from '../utils/envClipboard.js'
 import { parseDockerCommand } from '../utils/dockerCommand.js'
 import toast from '../utils/toast.js'
@@ -16,6 +17,8 @@ const props = defineProps({
   },
   service: { type: Object, default: null }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible', 'confirm'])
 
@@ -68,11 +71,8 @@ const isDockerDeploy = computed(() => currentDeployType.value === 'docker')
 
 watch(() => props.visible, (val) => {
   if (val) {
-    document.body.style.overflow = 'hidden'
     selectedEnvironmentId.value = props.currentEnvironment?.id ?? null
     props.service && props.mode !== 'create' ? loadServiceData() : (formData.value = emptyForm())
-  } else {
-    document.body.style.overflow = ''
   }
 })
 
@@ -309,7 +309,6 @@ const doImport = () => {
   }
 }
 
-onUnmounted(() => { document.body.style.overflow = '' })
 </script>
 
 <template>

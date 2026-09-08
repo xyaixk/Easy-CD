@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import Sortable from 'sortablejs'
 import ServiceCard from './ServiceCard.vue'
+import LoadingOverlay from './LoadingOverlay.vue'
 import { buildServiceBuckets, createServiceLayout } from '@/utils/serviceLayout'
 import {
   getGroupCollapseKey,
@@ -30,6 +31,14 @@ const props = defineProps({
   layoutSaving: {
     type: Boolean,
     default: false
+  },
+  loading: {
+    type: Boolean,
+    default: false
+  },
+  blockingTaskByServiceId: {
+    type: Map,
+    default: () => new Map()
   }
 })
 
@@ -53,6 +62,8 @@ const boardRoot = ref(null)
 const namedGroupsRoot = ref(null)
 const dragging = ref(false)
 const collapsedGroupKeys = ref(new Set())
+const openGroupMenuId = ref(null)
+const activeMenuTrigger = ref(null)
 let sortableInstances = []
 let draggingResetTimer = null
 let layoutBeforeDrag = ''
@@ -102,6 +113,46 @@ const toggleGroupCollapsed = groupId => {
   }
 }
 
+const closeGroupMenu = () => {
+  openGroupMenuId.value = null
+  activeMenuTrigger.value = null
+}
+
+const toggleGroupMenu = (groupId, event) => {
+  event.stopPropagation()
+
+  if (openGroupMenuId.value === groupId) {
+    closeGroupMenu()
+    return
+  }
+
+  window.dispatchEvent(new CustomEvent('close-all-menus'))
+  activeMenuTrigger.value = event.currentTarget
+  openGroupMenuId.value = groupId
+}
+
+const handleGroupAction = (action, bucket) => {
+  closeGroupMenu()
+  emit(action, bucket)
+}
+
+const handleDocumentClick = event => {
+  if (openGroupMenuId.value === null) return
+
+  const currentMenu = boardRoot.value?.querySelector(
+    `.group-actions[data-group-id="${openGroupMenuId.value}"]`
+  )
+  if (!currentMenu?.contains(event.target)) closeGroupMenu()
+}
+
+const handleDocumentKeydown = event => {
+  if (event.key !== 'Escape' || openGroupMenuId.value === null) return
+
+  const trigger = activeMenuTrigger.value
+  closeGroupMenu()
+  nextTick(() => trigger?.focus())
+}
+
 const destroySortables = () => {
   sortableInstances.forEach(instance => instance.destroy())
   sortableInstances = []
@@ -130,6 +181,7 @@ const beginDragging = () => {
     clearTimeout(draggingResetTimer)
     draggingResetTimer = null
   }
+  closeGroupMenu()
   layoutBeforeDrag = JSON.stringify(captureLayout())
   dragging.value = true
   emit('dragging-change', true)
@@ -196,13 +248,24 @@ const layoutSignature = computed(() => [
 ].join('|'))
 
 watch(layoutSignature, initializeSortables, { flush: 'post' })
-watch(() => props.environmentId, loadCollapsedGroups, { immediate: true })
+watch(() => props.environmentId, () => {
+  closeGroupMenu()
+  loadCollapsedGroups()
+}, { immediate: true })
 
-onMounted(initializeSortables)
+onMounted(() => {
+  initializeSortables()
+  document.addEventListener('click', handleDocumentClick)
+  document.addEventListener('keydown', handleDocumentKeydown)
+  window.addEventListener('close-all-menus', closeGroupMenu)
+})
 
 onUnmounted(() => {
   initializationVersion++
   destroySortables()
+  document.removeEventListener('click', handleDocumentClick)
+  document.removeEventListener('keydown', handleDocumentKeydown)
+  window.removeEventListener('close-all-menus', closeGroupMenu)
   if (draggingResetTimer) clearTimeout(draggingResetTimer)
   if (dragging.value) emit('dragging-change', false)
 })
@@ -212,7 +275,8 @@ onUnmounted(() => {
   <div
     ref="boardRoot"
     class="service-group-board"
-    :class="{ 'drag-disabled': dragDisabled, 'layout-saving': layoutSaving }"
+    :class="{ 'drag-disabled': dragDisabled, 'layout-saving': layoutSaving, 'is-loading': loading }"
+    :aria-busy="loading"
   >
     <div ref="namedGroupsRoot" class="named-groups">
       <section
@@ -255,22 +319,60 @@ onUnmounted(() => {
             <h2>{{ bucket.name }}</h2>
             <span class="service-count">{{ bucket.services.length }}</span>
           </div>
-          <div class="group-actions" data-no-drag>
+          <div
+            class="group-actions"
+            :data-group-id="bucket.id"
+            data-no-drag
+          >
             <button
+              class="group-menu-trigger"
               type="button"
               :disabled="dragging || layoutSaving"
-              @click="emit('rename-group', bucket)"
+              aria-label="分组操作"
+              title="分组操作"
+              aria-haspopup="menu"
+              :aria-expanded="openGroupMenuId === bucket.id"
+              :aria-controls="`group-actions-menu-${bucket.id}`"
+              @click="toggleGroupMenu(bucket.id, $event)"
             >
-              重命名
+              <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="5" cy="12" r="1.75"/>
+                <circle cx="12" cy="12" r="1.75"/>
+                <circle cx="19" cy="12" r="1.75"/>
+              </svg>
             </button>
-            <button
-              class="danger"
-              type="button"
-              :disabled="dragging || layoutSaving"
-              @click="emit('delete-group', bucket)"
+
+            <div
+              v-if="openGroupMenuId === bucket.id"
+              :id="`group-actions-menu-${bucket.id}`"
+              class="group-action-menu"
+              role="menu"
             >
-              删除
-            </button>
+              <button
+                type="button"
+                role="menuitem"
+                @click="handleGroupAction('rename-group', bucket)"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 20h9"/>
+                  <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/>
+                </svg>
+                <span>重命名</span>
+              </button>
+              <button
+                class="danger"
+                type="button"
+                role="menuitem"
+                @click="handleGroupAction('delete-group', bucket)"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M3 6h18"/>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                </svg>
+                <span>删除</span>
+              </button>
+            </div>
           </div>
         </header>
 
@@ -288,6 +390,7 @@ onUnmounted(() => {
             <ServiceCard
               :service="service"
               :view-disabled="dragging"
+              :blocking-task="blockingTaskByServiceId.get(String(service.id)) || null"
               @update="emit('update', $event)"
               @rollback="emit('rollback', $event)"
               @restart="emit('restart', $event)"
@@ -350,6 +453,7 @@ onUnmounted(() => {
           <ServiceCard
             :service="service"
             :view-disabled="dragging"
+            :blocking-task="blockingTaskByServiceId.get(String(service.id)) || null"
             @update="emit('update', $event)"
             @rollback="emit('rollback', $event)"
             @restart="emit('restart', $event)"
@@ -369,6 +473,7 @@ onUnmounted(() => {
       搜索或筛选状态下暂不支持拖动排序
     </div>
     <div v-if="layoutSaving" class="layout-saving-hint">正在保存布局…</div>
+    <LoadingOverlay v-if="loading" label="服务数据加载中…" />
   </div>
 </template>
 
@@ -377,6 +482,14 @@ onUnmounted(() => {
 .named-groups {
   display: grid;
   gap: 1.25rem;
+}
+
+.service-group-board {
+  position: relative;
+}
+
+.service-group-board.is-loading {
+  min-height: 180px;
 }
 
 .service-group {
@@ -404,6 +517,10 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+}
+
+.group-actions {
+  position: relative;
 }
 
 .group-heading h2 {
@@ -475,29 +592,93 @@ onUnmounted(() => {
   transform: rotate(-90deg);
 }
 
-.group-actions button {
-  padding: 0.35rem 0.55rem;
+.group-menu-trigger {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  place-items: center;
   color: var(--text-secondary);
-  font-size: 0.78rem;
   background: transparent;
-  border: 1px solid var(--border-color);
+  border: 0;
   border-radius: 6px;
   cursor: pointer;
 }
 
-.group-actions button:hover {
-  color: var(--primary-color);
-  border-color: var(--primary-color);
+.group-menu-trigger svg {
+  fill: currentColor;
 }
 
-.group-actions button:disabled {
+.group-menu-trigger:hover:not(:disabled),
+.group-menu-trigger[aria-expanded='true'] {
+  color: var(--primary-color);
+  background: var(--bg-hover);
+}
+
+.group-menu-trigger:focus-visible,
+.group-action-menu button:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.group-menu-trigger:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-.group-actions button.danger:hover {
+.group-action-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  width: 8.5rem;
+  padding: 0.35rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  box-shadow: var(--shadow-lg);
+  animation: reveal-group-menu 0.14s ease-out;
+}
+
+.group-action-menu button {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  color: var(--text-primary);
+  font-size: 0.82rem;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.group-action-menu button:hover {
+  color: var(--primary-color);
+  background: var(--bg-hover);
+}
+
+.group-action-menu button.danger {
   color: var(--danger-color);
-  border-color: var(--danger-color);
+}
+
+.group-action-menu button.danger:hover {
+  background: color-mix(in srgb, var(--danger-color) 10%, transparent);
+}
+
+@keyframes reveal-group-menu {
+  from {
+    opacity: 0;
+    transform: translateY(-0.25rem);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .service-card-grid {
@@ -583,8 +764,14 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .group-actions {
-    gap: 0.35rem;
+  .group-action-menu {
+    width: 8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .group-action-menu {
+    animation: none;
   }
 }
 </style>

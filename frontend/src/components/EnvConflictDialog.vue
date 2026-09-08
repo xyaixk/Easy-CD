@@ -1,5 +1,6 @@
 <script setup>
 import { ref, watch } from 'vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -15,6 +16,8 @@ const props = defineProps({
     default: 0
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible', 'confirm'])
 const choices = ref({})

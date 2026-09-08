@@ -127,6 +127,7 @@ onUnmounted(() => {
 <style scoped>
 .env-selector-wrapper {
   position: relative;
+  min-width: 0;
 }
 
 /* 环境徽章按钮 */
@@ -143,6 +144,7 @@ onUnmounted(() => {
   transition: all 0.2s;
   cursor: pointer;
   height: 40px;
+  min-width: 0;
 }
 
 .env-badge:hover {
@@ -159,6 +161,10 @@ onUnmounted(() => {
   font-weight: 600;
   font-size: 0.875rem;
   color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .env-type {
@@ -175,6 +181,7 @@ onUnmounted(() => {
   margin-left: 0.25rem;
   color: var(--text-tertiary);
   transition: transform 0.2s;
+  flex-shrink: 0;
 }
 
 .env-badge:hover .env-arrow {
@@ -337,5 +344,52 @@ onUnmounted(() => {
 .env-add-btn:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 12px var(--primary-shadow);
+}
+
+@media (max-width: 640px) {
+  .env-selector-wrapper {
+    flex: 1;
+    overflow: visible;
+  }
+
+  .env-badge {
+    width: 100%;
+    height: 36px;
+    padding: 0.5rem 0.625rem;
+    gap: 0.4rem;
+  }
+
+  .env-type {
+    display: none;
+  }
+
+  .env-arrow {
+    margin-left: 0;
+  }
+
+  .env-dropdown {
+    position: fixed;
+    top: 68px;
+    left: 0.5rem;
+    right: 0.5rem;
+    width: auto;
+  }
+}
+
+@media (max-width: 420px) {
+  .env-badge {
+    height: 34px;
+    padding: 0.4rem 0.5rem;
+  }
+
+  .env-badge svg:first-child {
+    width: 16px;
+    height: 16px;
+  }
+
+  .env-arrow {
+    width: 12px;
+    height: 12px;
+  }
 }
 </style>

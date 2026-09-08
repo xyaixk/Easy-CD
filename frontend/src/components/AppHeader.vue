@@ -18,6 +18,10 @@ const props = defineProps({
   activeTaskCount: {
     type: Number,
     default: 0
+  },
+  tasksOpen: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -66,8 +70,14 @@ const hasLokiConfig = computed(() => {
           @add-environment="emit('addEnvironment')"
           @delete-environment="emit('deleteEnvironment', $event)"
         />
-        
-        <button class="header-btn task-btn" title="部署任务" @click="emit('openTasks')">
+
+        <button
+          class="header-btn task-btn"
+          :class="{ active: tasksOpen }"
+          title="部署任务"
+          :aria-pressed="tasksOpen"
+          @click="emit('openTasks')"
+        >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"/>
             <polyline points="12 6 12 12 16 14"/>
@@ -135,7 +145,7 @@ const hasLokiConfig = computed(() => {
 }
 
 .header-content {
-  max-width: 1400px;
+  max-width: var(--content-max-width);
   margin: 0 auto;
   padding: 0 2rem;
   height: 68px;
@@ -222,6 +232,12 @@ const hasLokiConfig = computed(() => {
   position: relative;
 }
 
+.task-btn.active {
+  color: var(--primary-color);
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.28);
+}
+
 .task-badge {
   position: absolute;
   top: -5px;
@@ -260,5 +276,75 @@ const hasLokiConfig = computed(() => {
 .logout-text {
   font-size: 0.75rem;
   opacity: 0.8;
+}
+
+@media (max-width: 640px) {
+  .header-content {
+    height: 60px;
+    padding: 0 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .logo-section {
+    gap: 0;
+  }
+
+  .logo-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+  }
+
+  .logo-icon svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .logo-info {
+    display: none;
+  }
+
+  .header-actions {
+    flex: 1;
+    flex-shrink: 1;
+    min-width: 0;
+    justify-content: flex-end;
+    gap: 0.375rem;
+  }
+
+  .header-btn,
+  .header-user {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    padding: 0;
+  }
+
+  .header-user {
+    justify-content: center;
+  }
+
+  .header-user span {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .header-content {
+    padding: 0 0.5rem;
+    gap: 0.375rem;
+  }
+
+  .logo-icon,
+  .header-btn,
+  .header-user {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+  }
+
+  .header-actions {
+    gap: 0.25rem;
+  }
 }
 </style>

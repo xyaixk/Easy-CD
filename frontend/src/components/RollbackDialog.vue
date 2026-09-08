@@ -2,6 +2,7 @@
 import { ref, watch, computed } from 'vue'
 import { getAvailableVersions } from '@/api/service'
 import toast from '@/utils/toast'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -13,6 +14,8 @@ const props = defineProps({
     required: true
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['confirm', 'cancel', 'update:visible'])
 
@@ -270,14 +273,20 @@ const handleCancel = () => {
   justify-content: center;
   z-index: 100000;
   backdrop-filter: blur(4px);
+  padding: 1rem;
 }
 
 .confirm-dialog {
   background: var(--bg-secondary);
   border-radius: 12px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
-  min-width: 500px;
-  max-width: 90vw;
+  width: 500px;
+  min-width: 0;
+  max-width: 100%;
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   animation: slideIn 0.3s ease;
 }
 
@@ -306,6 +315,8 @@ const handleCancel = () => {
 
 .dialog-body {
   padding: 1.5rem;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .dialog-desc {
@@ -531,5 +542,48 @@ const handleCancel = () => {
 .dialog-enter-from,
 .dialog-leave-to {
   opacity: 0;
+}
+
+@media (max-width: 480px) {
+  .confirm-dialog-overlay {
+    padding: 0.5rem;
+  }
+
+  .confirm-dialog {
+    max-height: calc(100vh - 1rem);
+  }
+
+  .dialog-header,
+  .dialog-body,
+  .dialog-footer {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .version-item {
+    gap: 0.75rem;
+    padding: 0.75rem;
+  }
+
+  .version-info {
+    min-width: 0;
+  }
+
+  .version-header,
+  .version-meta {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+
+  .dialog-footer {
+    gap: 0.75rem;
+  }
+
+  .btn-cancel,
+  .btn-confirm {
+    flex: 1;
+    min-width: 0;
+    padding: 0.625rem 0.75rem;
+  }
 }
 </style>

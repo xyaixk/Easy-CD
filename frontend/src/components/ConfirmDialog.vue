@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, Teleport } from 'vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -15,6 +16,8 @@ const props = defineProps({
     default: '确定要执行此操作吗？'
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['confirm', 'cancel', 'update:visible'])
 
@@ -136,14 +139,18 @@ const handleCancel = () => {
   justify-content: center;
   z-index: 100000;
   backdrop-filter: blur(8px);
+  padding: 1rem;
 }
 
 .confirm-dialog {
   background: var(--bg-secondary);
   border-radius: 16px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1);
-  min-width: 420px;
-  max-width: 90vw;
+  width: 420px;
+  min-width: 0;
+  max-width: 100%;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
   animation: slideIn 0.3s ease;
 }
 
@@ -291,5 +298,39 @@ const handleCancel = () => {
 .dialog-leave-to .confirm-dialog {
   opacity: 0;
   transform: scale(0.9) translateY(-20px);
+}
+
+@media (max-width: 480px) {
+  .confirm-dialog-overlay {
+    padding: 0.5rem;
+  }
+
+  .confirm-dialog {
+    max-height: calc(100vh - 1rem);
+  }
+
+  .dialog-header {
+    padding: 1rem 1rem 0.75rem;
+  }
+
+  .dialog-header h3 {
+    font-size: 1.15rem;
+  }
+
+  .dialog-body {
+    padding: 1.25rem 1rem;
+  }
+
+  .dialog-footer {
+    padding: 0.75rem 1rem 1rem;
+    gap: 0.75rem;
+  }
+
+  .btn-cancel,
+  .btn-confirm {
+    flex: 1;
+    min-width: 0;
+    padding: 0.7rem 0.75rem;
+  }
 }
 </style>

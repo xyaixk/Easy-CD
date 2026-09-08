@@ -6,6 +6,7 @@ import {
   parseDockerImageReference
 } from '../utils/dockerImage.js'
 import toast from '../utils/toast.js'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const HOLD_DURATION_MS = 1000
 
@@ -19,6 +20,8 @@ const props = defineProps({
     required: true
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['confirm', 'cancel', 'update:visible'])
 

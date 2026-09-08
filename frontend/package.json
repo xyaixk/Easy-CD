@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/utils/envClipboard.test.js src/utils/dockerImage.test.js src/utils/serviceLayout.test.js src/utils/serviceGroupCollapse.test.js",
+    "test": "node --test src/utils/envClipboard.test.js src/utils/dockerImage.test.js src/utils/serviceLayout.test.js src/utils/serviceGroupCollapse.test.js src/utils/deployTask.test.js src/utils/serviceLogs.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

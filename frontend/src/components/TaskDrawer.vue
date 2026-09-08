@@ -2,6 +2,11 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import toast from '@/utils/toast'
 import { listTasks, getTask } from '@/api/task'
+import {
+  getTaskStatusLabel,
+  getTaskTypeLabel,
+  isActiveTask
+} from '@/utils/deployTask'
 
 const props = defineProps({
   visible: {
@@ -14,12 +19,16 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:visible', 'task-finished', 'update:activeCount'])
+const emit = defineEmits([
+  'update:visible',
+  'task-finished',
+  'update:activeCount',
+  'update:activeTasks'
+])
 
 // 任务列表：首页（轮询刷新）+ 翻页累积的更早任务（游标 beforeId）
 const tasks = ref([])
 const olderTasks = ref([])
-const loading = ref(false)
 const loadingOlder = ref(false)
 const hasMore = ref(false)
 const PAGE_SIZE = 50
@@ -40,37 +49,20 @@ let prevStatusMap = new Map()
 
 // 轮询
 let pollTimer = null
-const POLL_INTERVAL = 2000
+let disposed = false
+const ACTIVE_POLL_INTERVAL = 2000
+const IDLE_POLL_INTERVAL = 10000
 
-const activeStatuses = ['PENDING', 'RUNNING']
+const activeTasks = computed(() => tasks.value.filter(isActiveTask))
 
 const activeCount = computed(() => {
-  return tasks.value.filter(t => activeStatuses.includes(t.status)).length
+  return activeTasks.value.length
 })
 
-watch(activeCount, (count) => {
-  emit('update:activeCount', count)
+watch(activeTasks, (currentTasks) => {
+  emit('update:activeCount', currentTasks.length)
+  emit('update:activeTasks', currentTasks)
 }, { immediate: true })
-
-const typeLabels = {
-  CREATE: '创建',
-  UPDATE: '更新',
-  DELETE: '删除',
-  RESTART: '重启',
-  STOP: '停止',
-  ROLLBACK: '回滚',
-  SCALE: '伸缩'
-}
-
-const statusLabels = {
-  PENDING: '排队中',
-  RUNNING: '执行中',
-  SUCCESS: '成功',
-  FAILED: '失败'
-}
-
-const getTypeLabel = (type) => typeLabels[type] || type
-const getStatusLabel = (status) => statusLabels[status] || status
 
 // 耗时格式化
 const formatDuration = (ms) => {
@@ -83,14 +75,17 @@ const formatDuration = (ms) => {
 
 // 拉取任务列表（首页，轮询复用；翻页数据在 olderTasks 中不受影响）
 const fetchTasks = async () => {
-  if (!props.environmentId) {
+  const environmentId = props.environmentId
+  if (!environmentId) {
     tasks.value = []
     olderTasks.value = []
     hasMore.value = false
     return
   }
   try {
-    const data = await listTasks(props.environmentId, PAGE_SIZE)
+    const data = await listTasks(environmentId, PAGE_SIZE)
+    if (props.environmentId !== environmentId) return
+
     detectFinished(data)
     tasks.value = data
     // 尚未翻过页时，首页拉满即认为可能还有更早的
@@ -105,22 +100,29 @@ const fetchTasks = async () => {
       }
     }
   } catch (error) {
-    console.error('加载任务列表失败:', error)
+    if (props.environmentId === environmentId) {
+      console.error('加载任务列表失败:', error)
+    }
   }
 }
 
 // 加载更早的任务（游标：当前列表最后一条的 id）
 const loadOlder = async () => {
   if (loadingOlder.value || !props.environmentId) return
+  const environmentId = props.environmentId
   const list = allTasks.value
   if (!list.length) return
   loadingOlder.value = true
   try {
-    const data = await listTasks(props.environmentId, PAGE_SIZE, list[list.length - 1].id)
+    const data = await listTasks(environmentId, PAGE_SIZE, list[list.length - 1].id)
+    if (props.environmentId !== environmentId) return
+
     olderTasks.value = [...olderTasks.value, ...data]
     hasMore.value = data.length >= PAGE_SIZE
   } catch (error) {
-    console.error('加载更早任务失败:', error)
+    if (props.environmentId === environmentId) {
+      console.error('加载更早任务失败:', error)
+    }
   } finally {
     loadingOlder.value = false
   }
@@ -130,8 +132,8 @@ const loadOlder = async () => {
 const detectFinished = (newTasks) => {
   newTasks.forEach(task => {
     const prev = prevStatusMap.get(task.id)
-    if (prev && activeStatuses.includes(prev) && !activeStatuses.includes(task.status)) {
-      const label = `${getTypeLabel(task.taskType)}「${task.serviceName}」`
+    if (prev && isActiveTask({ status: prev }) && !isActiveTask(task)) {
+      const label = `${getTaskTypeLabel(task.taskType)}「${task.serviceName}」`
       if (task.status === 'SUCCESS') {
         toast.success(`任务${label}执行成功`)
       } else {
@@ -175,45 +177,46 @@ const toggleExpand = async (task) => {
   await fetchExpandedLog(task.id)
 }
 
-// 轮询控制：抽屉打开或存在活跃任务时持续轮询
-const ensurePolling = () => {
-  if (pollTimer) return
-  pollTimer = setInterval(async () => {
-    if (!props.visible && activeCount.value === 0) {
-      stopPolling()
-      return
-    }
-    await fetchTasks()
-  }, POLL_INTERVAL)
-}
-
 const stopPolling = () => {
   if (pollTimer) {
-    clearInterval(pollTimer)
+    clearTimeout(pollTimer)
     pollTimer = null
   }
+}
+
+// 活跃任务或面板打开时快速刷新；空闲时低频检查其他用户新提交的任务
+const schedulePolling = () => {
+  stopPolling()
+  if (disposed || !props.environmentId) return
+
+  const interval = props.visible || activeCount.value > 0
+    ? ACTIVE_POLL_INTERVAL
+    : IDLE_POLL_INTERVAL
+
+  pollTimer = setTimeout(async () => {
+    pollTimer = null
+    await fetchTasks()
+    schedulePolling()
+  }, interval)
 }
 
 // 外部（提交任务后）调用：立即刷新并启动轮询
 const refresh = async () => {
   await fetchTasks()
-  ensurePolling()
+  schedulePolling()
 }
 
 defineExpose({ refresh })
 
 watch(() => props.visible, async (visible) => {
   if (visible) {
-    // 锁住背景滚动，避免抽屉内滚动穿透到页面
-    document.body.style.overflow = 'hidden'
     await fetchTasks()
-    ensurePolling()
-  } else {
-    document.body.style.overflow = ''
   }
+  schedulePolling()
 })
 
 watch(() => props.environmentId, async () => {
+  stopPolling()
   tasks.value = []
   olderTasks.value = []
   hasMore.value = false
@@ -221,9 +224,7 @@ watch(() => props.environmentId, async () => {
   expandedLog.value = ''
   prevStatusMap = new Map()
   await fetchTasks()
-  if (activeCount.value > 0) {
-    ensurePolling()
-  }
+  schedulePolling()
 })
 
 const close = () => {
@@ -231,248 +232,253 @@ const close = () => {
 }
 
 onMounted(async () => {
+  disposed = false
   // 初始拉一次，恢复徽标（如后端有历史活跃任务）
   await fetchTasks()
-  if (activeCount.value > 0) {
-    ensurePolling()
-  }
+  schedulePolling()
 })
 
 onUnmounted(() => {
-  document.body.style.overflow = ''
+  disposed = true
   stopPolling()
 })
 </script>
 
 <template>
-  <Teleport to="body">
-    <Transition name="drawer-fade">
-      <div v-if="visible" class="drawer-overlay">
-        <Transition name="drawer-slide" appear>
-          <div class="drawer-panel">
-            <div class="drawer-header">
-              <div class="drawer-title">
-                <div class="header-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="8" y1="6" x2="21" y2="6"/>
-                    <line x1="8" y1="12" x2="21" y2="12"/>
-                    <line x1="8" y1="18" x2="21" y2="18"/>
-                    <line x1="3" y1="6" x2="3.01" y2="6"/>
-                    <line x1="3" y1="12" x2="3.01" y2="12"/>
-                    <line x1="3" y1="18" x2="3.01" y2="18"/>
-                  </svg>
-                </div>
-                <h3>部署任务</h3>
-                <span v-if="activeCount > 0" class="active-badge">{{ activeCount }} 个进行中</span>
-              </div>
-              <button class="drawer-close" @click="close">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <line x1="18" y1="6" x2="6" y2="18"/>
-                  <line x1="6" y1="6" x2="18" y2="18"/>
-                </svg>
-              </button>
-            </div>
-
-            <div class="drawer-body">
-              <!-- 空状态 -->
-              <div v-if="allTasks.length === 0" class="task-empty">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <circle cx="12" cy="12" r="10"/>
-                  <polyline points="12 6 12 12 16 14"/>
-                </svg>
-                <p>当前环境暂无部署任务</p>
-              </div>
-
-              <!-- 任务列表 -->
-              <div
-                v-for="task in allTasks"
-                :key="task.id"
-                class="task-item"
-                :class="{ expanded: expandedId === task.id }"
-              >
-                <div class="task-row" @click="toggleExpand(task)">
-                  <div class="task-main">
-                    <div class="task-line1">
-                      <span class="task-type" :class="task.taskType.toLowerCase()">{{ getTypeLabel(task.taskType) }}</span>
-                      <span class="task-service">{{ task.serviceName }}</span>
-                      <span class="task-status" :class="task.status.toLowerCase()">
-                        <span v-if="task.status === 'RUNNING'" class="status-dot"></span>
-                        {{ getStatusLabel(task.status) }}
-                      </span>
-                    </div>
-                    <div class="task-line2">
-                      <span>#{{ task.id }}</span>
-                      <span v-if="task.submittedBy">{{ task.submittedBy }}</span>
-                      <span v-if="task.submittedIp" class="task-ip">{{ task.submittedIp }}</span>
-                      <span>{{ task.createdTime }}</span>
-                      <span v-if="task.durationMs != null">耗时 {{ formatDuration(task.durationMs) }}</span>
-                    </div>
-                  </div>
-                  <svg
-                    class="task-arrow"
-                    :class="{ rotated: expandedId === task.id }"
-                    width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                  >
-                    <polyline points="6 9 12 15 18 9"/>
-                  </svg>
-                </div>
-
-                <!-- 终端风格日志 -->
-                <div v-if="expandedId === task.id" class="task-log-wrapper">
-                  <div v-if="task.errorMsg" class="task-error">{{ task.errorMsg }}</div>
-                  <pre ref="logRef" class="task-log">{{ expandedLog || '暂无命令输出...' }}</pre>
-                </div>
-              </div>
-
-              <!-- 加载更早的任务 -->
-              <div v-if="hasMore && allTasks.length" class="load-older">
-                <button class="older-btn" :disabled="loadingOlder" @click="loadOlder">
-                  <span v-if="loadingOlder" class="mini-spinner"></span>
-                  {{ loadingOlder ? '加载中...' : '加载更早的任务' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </Transition>
+  <section v-if="visible" class="task-panel" aria-label="部署任务面板">
+    <header class="task-panel-header">
+      <div class="task-panel-title">
+        <span class="header-icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"/>
+            <line x1="8" y1="12" x2="21" y2="12"/>
+            <line x1="8" y1="18" x2="21" y2="18"/>
+            <line x1="3" y1="6" x2="3.01" y2="6"/>
+            <line x1="3" y1="12" x2="3.01" y2="12"/>
+            <line x1="3" y1="18" x2="3.01" y2="18"/>
+          </svg>
+        </span>
+        <div>
+          <h2>部署任务</h2>
+          <p>{{ allTasks.length }} 条任务记录</p>
+        </div>
       </div>
-    </Transition>
-  </Teleport>
+      <div class="task-panel-actions">
+        <span v-if="activeCount > 0" class="active-badge">
+          <span class="active-pulse" aria-hidden="true"></span>
+          {{ activeCount }} 个进行中
+        </span>
+        <button class="panel-close" type="button" title="收起部署任务" aria-label="收起部署任务" @click="close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="task-panel-body">
+      <div v-if="allTasks.length === 0" class="task-empty">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <p>当前环境暂无部署任务</p>
+      </div>
+
+      <article
+        v-for="task in allTasks"
+        :key="task.id"
+        class="task-item"
+        :class="[task.status.toLowerCase(), { expanded: expandedId === task.id }]"
+      >
+        <button class="task-row" type="button" @click="toggleExpand(task)">
+          <span class="task-main">
+            <span class="task-line1">
+              <span class="task-type" :class="task.taskType.toLowerCase()">{{ getTaskTypeLabel(task.taskType) }}</span>
+              <span class="task-service">{{ task.serviceName }}</span>
+              <span class="task-status" :class="task.status.toLowerCase()">
+                <span v-if="task.status === 'RUNNING'" class="status-dot"></span>
+                {{ getTaskStatusLabel(task.status) }}
+              </span>
+            </span>
+            <span class="task-line2">
+              <span>#{{ task.id }}</span>
+              <span v-if="task.submittedBy">{{ task.submittedBy }}</span>
+              <span v-if="task.submittedIp" class="task-ip">{{ task.submittedIp }}</span>
+              <span>{{ task.createdTime }}</span>
+              <span v-if="task.durationMs != null">耗时 {{ formatDuration(task.durationMs) }}</span>
+            </span>
+          </span>
+          <svg
+            class="task-arrow"
+            :class="{ rotated: expandedId === task.id }"
+            width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            aria-hidden="true"
+          >
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </button>
+
+        <div v-if="expandedId === task.id" class="task-log-wrapper">
+          <div v-if="task.errorMsg" class="task-error">{{ task.errorMsg }}</div>
+          <pre ref="logRef" class="task-log">{{ expandedLog || '暂无命令输出...' }}</pre>
+        </div>
+      </article>
+
+      <div v-if="hasMore && allTasks.length" class="load-older">
+        <button class="older-btn" :disabled="loadingOlder" @click="loadOlder">
+          <span v-if="loadingOlder" class="mini-spinner"></span>
+          {{ loadingOlder ? '加载中...' : '加载更早的任务' }}
+        </button>
+      </div>
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.drawer-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  z-index: 10000;
-}
-
-.drawer-panel {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 480px;
-  max-width: 92vw;
-  background: var(--bg-secondary);
-  border-radius: 16px 0 0 16px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+.task-panel {
   display: flex;
+  height: 100%;
+  min-height: 260px;
   flex-direction: column;
   overflow: hidden;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
 }
 
-/* 过渡动画 */
-.drawer-fade-enter-active,
-.drawer-fade-leave-active {
-  transition: opacity 0.25s ease;
-}
-
-.drawer-fade-enter-from,
-.drawer-fade-leave-to {
-  opacity: 0;
-}
-
-.drawer-slide-enter-active,
-.drawer-slide-leave-active {
-  transition: transform 0.3s ease;
-}
-
-.drawer-slide-enter-from,
-.drawer-slide-leave-to {
-  transform: translateX(100%);
-}
-
-.drawer-header {
-  padding: 0.875rem 1.5rem;
-  background: var(--primary-gradient);
+.task-panel-header {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
+  gap: 0.75rem;
   flex-shrink: 0;
+  min-height: 60px;
+  padding: 0.75rem 0.85rem;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
 }
 
-.drawer-title {
+.task-panel-title,
+.task-panel-actions {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  color: white;
+}
+
+.task-panel-title {
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.task-panel-actions {
+  gap: 0.35rem;
+  flex-shrink: 0;
 }
 
 .header-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.2);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: white;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
   flex-shrink: 0;
+  color: var(--primary-color);
+  background: var(--primary-light);
+  border-radius: 8px;
 }
 
-.drawer-title h3 {
+.task-panel-title h2 {
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: white;
-}
-
-.active-badge {
-  padding: 0.25rem 0.75rem;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.2);
-  color: white;
-  font-size: 0.75rem;
-  font-weight: 600;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.drawer-close {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.2);
-  border: none;
-  color: white;
-  display: flex;
+.task-panel-title p {
+  margin: 0.15rem 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.66rem;
+  line-height: 1.2;
+}
+
+.active-badge {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 0.3rem;
+  padding: 2px 6px;
+  color: var(--warning-color);
+  font-size: 0.66rem;
+  font-weight: 700;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--warning-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning-color) 25%, var(--border-color));
+  border-radius: 999px;
+}
+
+.active-pulse {
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  animation: task-pulse 1.2s infinite;
+}
+
+.panel-close {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  color: var(--text-secondary);
+  background: transparent;
+  border-radius: 6px;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 
-.drawer-close:hover {
-  background: rgba(255, 255, 255, 0.3);
-  transform: scale(1.1);
+.panel-close:hover {
+  color: var(--primary-color);
+  background: var(--bg-hover);
 }
 
-.drawer-body {
+.panel-close:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+.task-panel-body {
+  display: flex;
   flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.7rem;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 1.25rem 1.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
+  scrollbar-color: var(--border-hover) transparent;
+  scrollbar-width: thin;
 }
 
-.drawer-body::-webkit-scrollbar {
+.task-panel-body::-webkit-scrollbar {
   width: 8px;
 }
 
-.drawer-body::-webkit-scrollbar-track {
-  background: var(--bg-primary);
+.task-panel-body::-webkit-scrollbar-track {
+  background: transparent;
   border-radius: 4px;
 }
 
-.drawer-body::-webkit-scrollbar-thumb {
-  background: var(--text-tertiary);
+.task-panel-body::-webkit-scrollbar-thumb {
+  background: var(--border-hover);
   border-radius: 4px;
 }
 
-.drawer-body::-webkit-scrollbar-thumb:hover {
+.task-panel-body::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
 }
 
@@ -488,24 +494,33 @@ onUnmounted(() => {
 }
 
 .task-item {
-  /* drawer-body 是 flex 纵向容器，不禁止收缩的话任务多时会被压扁挤在一起，滚动条也撑不出来 */
   flex-shrink: 0;
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: var(--bg-primary);
   overflow: hidden;
-  transition: border-color 0.2s;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--text-tertiary);
+  border-radius: 10px;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .task-item.expanded {
   border-color: var(--primary-color);
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--primary-color) 10%, transparent);
 }
+
+.task-item.running { border-left-color: var(--warning-color); }
+.task-item.success { border-left-color: var(--success-color); }
+.task-item.failed { border-left-color: var(--danger-color); }
 
 .task-row {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem 0.875rem;
+  color: inherit;
+  text-align: left;
+  background: transparent;
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -515,6 +530,7 @@ onUnmounted(() => {
 }
 
 .task-main {
+  display: block;
   flex: 1;
   min-width: 0;
 }
@@ -606,6 +622,11 @@ onUnmounted(() => {
   transform: rotate(180deg);
 }
 
+.task-row:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
+}
+
 .task-log-wrapper {
   border-top: 1px solid var(--border-color);
 }
@@ -678,5 +699,20 @@ onUnmounted(() => {
 
 @keyframes task-spin {
   to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .active-pulse,
+  .status-dot,
+  .mini-spinner {
+    animation: none;
+  }
+
+  .task-item,
+  .task-row,
+  .task-arrow,
+  .panel-close {
+    transition: none;
+  }
 }
 </style>

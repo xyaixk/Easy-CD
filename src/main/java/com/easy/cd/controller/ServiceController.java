@@ -4,7 +4,9 @@ import com.easy.cd.common.Result;
 import com.easy.cd.dto.ImageVersionDTO;
 import com.easy.cd.dto.ReplicaDetailDTO;
 import com.easy.cd.dto.ServiceCreateDTO;
+import com.easy.cd.dto.ServiceLogInstanceDTO;
 import com.easy.cd.dto.ServiceUpdateDTO;
+import com.easy.cd.service.ServiceLogService;
 import com.easy.cd.service.ServiceManagementService;
 import com.easy.cd.vo.ServiceDetailVO;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +25,7 @@ import java.util.List;
 public class ServiceController {
     
     private final ServiceManagementService serviceManagementService;
+    private final ServiceLogService serviceLogService;
     
     /**
      * 查询环境下的所有服务
@@ -127,6 +130,15 @@ public class ServiceController {
         log.info("查看服务副本, id: {}", id);
         List<ReplicaDetailDTO> replicas = (List<ReplicaDetailDTO>) serviceManagementService.getReplicas(id);
         return Result.success(replicas);
+    }
+
+    /**
+     * 获取 Docker Swarm 中仍可追溯的服务日志实例
+     */
+    @GetMapping("/{id}/log-instances")
+    public Result<List<ServiceLogInstanceDTO>> getLogInstances(@PathVariable Long id) {
+        log.info("查看服务日志实例, id: {}", id);
+        return Result.success(serviceLogService.listInstances(id));
     }
     
     /**

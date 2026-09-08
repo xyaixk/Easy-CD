@@ -153,9 +153,10 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         // 步骤2: 校验和获取环境
         Environment environment = getEnvironmentOrThrow(service.getEnvironmentId());
         validateUpdateFields(updateDTO);
+        ServiceUpdateDTO effectiveUpdate = applyImageUpdateRollbackPolicy(service, updateDTO);
         
         // 步骤3: 构建部署请求
-        DeployRequest deployRequest = buildUpdateDeployRequest(service, updateDTO);
+        DeployRequest deployRequest = buildUpdateDeployRequest(service, effectiveUpdate);
         
         // 步骤4: 调用部署服务更新
         log.info("开始部署更新: {}", service.getName());
@@ -166,7 +167,7 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         }
         
         // 步骤5: 更新数据库
-        updateServiceInfo(service, updateDTO);
+        updateServiceInfo(service, effectiveUpdate);
         updateExternalServiceInfo(service, deployResult);
         updateServiceStatus(service.getId(), deployResult);
         
@@ -796,6 +797,36 @@ public class ServiceManagementServiceImpl implements ServiceManagementService {
         if (updateDTO.getDescription() != null && updateDTO.getDescription().length() > 20) {
             throw new BusinessException("服务描述最多20个字符");
         }
+    }
+
+    /** 镜像变更统一启用 Swarm 自动回滚，并将实际策略同步保存到 dockerParams。 */
+    private ServiceUpdateDTO applyImageUpdateRollbackPolicy(AppService service, ServiceUpdateDTO updateDTO) {
+        String requestedImage = updateDTO.getDockerImage();
+        String currentImage = service.getDockerImage() == null ? null : service.getDockerImage().trim();
+        if (requestedImage == null || requestedImage.trim().equals(currentImage)) {
+            return updateDTO;
+        }
+
+        ServiceUpdateDTO normalized = new ServiceUpdateDTO();
+        normalized.setName(updateDTO.getName());
+        normalized.setDescription(updateDTO.getDescription());
+        normalized.setVersion(updateDTO.getVersion());
+        normalized.setDockerImage(updateDTO.getDockerImage());
+        normalized.setReplicas(updateDTO.getReplicas());
+
+        String paramsJson = updateDTO.getDockerParams() != null
+                ? updateDTO.getDockerParams()
+                : service.getDockerParams();
+        Map<String, Object> params = new LinkedHashMap<>();
+        if (paramsJson != null && !paramsJson.trim().isEmpty()) {
+            Map<String, Object> parsed = parseDockerParams(paramsJson);
+            if (parsed != null) {
+                params.putAll(parsed);
+            }
+        }
+        params.put("update_failure_action", "rollback");
+        normalized.setDockerParams(JSON.toJSONString(params));
+        return normalized;
     }
     
     /**

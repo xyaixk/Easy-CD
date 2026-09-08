@@ -8,9 +8,11 @@ import com.easy.cd.auth.SessionManager;
 import com.easy.cd.entity.AppService;
 import com.easy.cd.entity.Environment;
 import com.easy.cd.entity.ReplicaStatus;
+import com.easy.cd.dto.ServiceLogInstanceDTO;
 import com.easy.cd.mapper.EnvironmentMapper;
 import com.easy.cd.mapper.ReplicaStatusMapper;
 import com.easy.cd.mapper.ServiceMapper;
+import com.easy.cd.service.ServiceLogService;
 import com.easy.cd.util.SshExecutor.SshHost;
 import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
@@ -36,6 +38,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static com.easy.cd.util.SshExecutor.parseSshHostsFromConfig;
 
@@ -53,7 +56,7 @@ import static com.easy.cd.util.SshExecutor.parseSshHostsFromConfig;
  *
  * 连接参数：
  *   shell：/terminal?serviceId=&replicaId=&token=
- *   logs： /terminal?mode=logs&serviceId=&tail=&follow=&token=
+ *   logs： /terminal?mode=logs&serviceId=&taskId=&tail=&follow=&token=
  * 安全：环境 needLogin 时校验 token；容器 ID 从 replica_status 表反查（不信任前端）
  */
 @Slf4j
@@ -65,12 +68,13 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
     private final EnvironmentMapper environmentMapper;
     private final ReplicaStatusMapper replicaStatusMapper;
     private final SessionManager sessionManager;
+    private final ServiceLogService serviceLogService;
+    private final TerminalTargetHostResolver targetHostResolver;
+
+    private final ServiceLogCommandBuilder serviceLogCommandBuilder = new ServiceLogCommandBuilder();
 
     /** 容器 ID 合法性校验（防命令注入） */
     private static final Pattern CONTAINER_ID_PATTERN = Pattern.compile("^[0-9a-fA-F]{6,64}$");
-
-    /** 服务名合法性校验（防命令注入，虽然来自库里仍做防御性校验） */
-    private static final Pattern SERVICE_NAME_PATTERN = Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]*$");
 
     private static final int CONNECT_TIMEOUT = 10_000;
 
@@ -132,8 +136,12 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
                 return;
             }
 
-            SshHost target = resolveTargetHost(environment, replica.getNodeIp());
-            if (target == null) { closeWith(session, "环境未配置 SSH 地址"); return; }
+            SshHost target = targetHostResolver.resolve(
+                    environment, replica.getNodeName(), replica.getNodeIp());
+            if (target == null) {
+                closeWith(session, "未找到副本所在节点的 SSH 地址: " + replica.getNodeName());
+                return;
+            }
 
             String cmd = "docker exec -it " + containerId
                     + " /bin/sh -c '[ -x /bin/bash ] && exec /bin/bash || exec /bin/sh'";
@@ -153,13 +161,7 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
      */
     private void openLogs(WebSocketSession session, Environment environment, AppService service,
                           Map<String, String> params) {
-        String serviceName = service.getExternalServiceName() != null && !service.getExternalServiceName().isEmpty()
-                ? service.getExternalServiceName()
-                : service.getName().toLowerCase();
-        if (!SERVICE_NAME_PATTERN.matcher(serviceName).matches()) {
-            closeWith(session, "服务名不合法");
-            return;
-        }
+        String serviceName = serviceLogService.resolveServiceName(service);
 
         Map<String, Object> config = JSON.parseObject(
                 environment.getConfig(), new TypeReference<Map<String, Object>>() {});
@@ -170,25 +172,61 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
         try { tail = Integer.parseInt(params.getOrDefault("tail", "500")); } catch (NumberFormatException ignored) {}
         int effectiveTail = tail > 0 ? Math.min(tail, 1000) : 500;
         boolean follow = Boolean.parseBoolean(params.getOrDefault("follow", "false"));
+        String taskId = trimToNull(params.get("taskId"));
 
-        // 2>&1：docker service logs 会把容器 stderr 流的日志写到自己的 stderr，
-        // 合并到 stdout 后单条通道即可拿全（否则只能看到 stdout 流的那一半）
-        String cmd = "docker service logs " + serviceName
-                + " --tail " + effectiveTail
-                + " --no-trunc"
-                + (follow ? " --follow" : "")
-                + " 2>&1";
+        String cmd;
+        String targetLabel;
+        try {
+            if (taskId != null) {
+                List<ServiceLogInstanceDTO> instances = serviceLogService.listInstances(service, environment);
+                ServiceLogInstanceDTO selected = instances.stream()
+                        .filter(instance -> taskId.equals(instance.getTaskId()))
+                        .findFirst()
+                        .orElse(null);
+                if (selected == null) {
+                    closeWith(session, "实例已被 Swarm 清理或不属于当前服务，请刷新实例列表");
+                    return;
+                }
+                if (follow && !selected.isRunning()) {
+                    closeWith(session, "历史实例不支持实时推送");
+                    return;
+                }
+                cmd = serviceLogCommandBuilder.buildTask(taskId, effectiveTail, follow);
+                targetLabel = selected.getName() + "." + shortId(taskId);
+            } else if (follow) {
+                // 实时聚合不读取历史积压；service selector 能继续接收后续替换 task 的新输出。
+                cmd = serviceLogCommandBuilder.buildAggregate(
+                        serviceName, java.util.Collections.emptyList(), effectiveTail, true);
+                targetLabel = serviceName;
+            } else {
+                List<String> runningTaskIds = serviceLogService.listInstances(service, environment).stream()
+                        .filter(ServiceLogInstanceDTO::isRunning)
+                        .map(ServiceLogInstanceDTO::getTaskId)
+                        .collect(Collectors.toList());
+                if (runningTaskIds.isEmpty()) {
+                    closeNormallyWith(session, "当前没有运行中的实例，可从下拉框选择历史实例查看日志");
+                    return;
+                }
+                cmd = serviceLogCommandBuilder.buildAggregate(
+                        serviceName, runningTaskIds, effectiveTail, false);
+                targetLabel = serviceName;
+            }
+        } catch (Exception e) {
+            log.warn("构造服务日志命令失败, service={}: {}", serviceName, e.getMessage());
+            closeWith(session, e.getMessage() != null ? e.getMessage() : "查询服务日志实例失败");
+            return;
+        }
 
         // 静态模式读完即止，静默关闭；follow 模式断开时给提示
         String endMessage = follow ? "\r\n\u001b[90m[日志流已断开]\u001b[0m\r\n" : null;
         // 零输出时给出明确提示，避免前端空白无从判断
-        String emptyHint = "\u001b[90m[服务 " + serviceName + " 最近 " + effectiveTail
-                + " 行内没有日志输出]\u001b[0m\r\n";
+        String emptyHint = "\u001b[90m[" + targetLabel + (follow ? " 实时期间" : " 最近 " + effectiveTail + " 行内")
+                + "没有日志输出]\u001b[0m\r\n";
 
         Exception lastError = null;
         for (SshHost host : hosts) {
             try {
-                ShellContext ctx = openCommandChannel(session, host, cmd, "logs:" + serviceName,
+                ShellContext ctx = openCommandChannel(session, host, cmd, "logs:" + targetLabel,
                         endMessage, emptyHint);
                 ctx.readOnly = true;
                 return;
@@ -198,27 +236,6 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
             }
         }
         closeWith(session, "日志通道建立失败: " + (lastError != null ? lastError.getMessage() : "未知错误"));
-    }
-
-    /**
-     * 目标节点：容器所在节点 IP + manager 的 SSH 凭证（集群统一凭证约定）；
-     * 若该节点本身就是 manager 则直接用其配置；nodeIp 缺失时退回第一个 manager。
-     */
-    private SshHost resolveTargetHost(Environment environment, String nodeIp) {
-        Map<String, Object> config = JSON.parseObject(
-                environment.getConfig(), new TypeReference<Map<String, Object>>() {});
-        List<SshHost> managers = parseSshHostsFromConfig(config);
-        if (managers.isEmpty()) return null;
-
-        if (nodeIp != null && !nodeIp.isEmpty()) {
-            for (SshHost m : managers) {
-                if (nodeIp.equals(m.getHost())) return m;
-            }
-            SshHost first = managers.get(0);
-            return new SshHost(nodeIp, first.getPort(), first.getUsername(),
-                    first.getPassword(), first.getPrivateKey());
-        }
-        return managers.get(0);
     }
 
     /**
@@ -355,6 +372,23 @@ public class TerminalWebSocketHandler extends AbstractWebSocketHandler {
             session.sendMessage(new TextMessage("\u001b[31m" + message + "\u001b[0m\r\n"));
             session.close(CloseStatus.POLICY_VIOLATION);
         } catch (Exception ignored) {}
+    }
+
+    /** 发送普通状态提示后正常关闭连接 */
+    private void closeNormallyWith(WebSocketSession session, String message) {
+        try {
+            session.sendMessage(new TextMessage("\u001b[90m" + message + "\u001b[0m\r\n"));
+            session.close(CloseStatus.NORMAL);
+        } catch (Exception ignored) {}
+    }
+
+    private String trimToNull(String value) {
+        if (value == null || value.trim().isEmpty()) return null;
+        return value.trim();
+    }
+
+    private String shortId(String value) {
+        return value.length() > 12 ? value.substring(0, 12) : value;
     }
 
     private Map<String, String> parseQuery(String query) throws Exception {

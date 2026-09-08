@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import AppHeader from './components/AppHeader.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import ServiceGroupBoard from './components/ServiceGroupBoard.vue'
 import ServiceGroupDialog from './components/ServiceGroupDialog.vue'
 import EnvDialog from './components/EnvDialog.vue'
@@ -33,8 +34,15 @@ import {
   updateServiceGroup
 } from '@/api/serviceGroup'
 import { clearAuth, getCurrentUser as getStoredUser, getToken, setAuth } from '@/utils/auth'
+import {
+  buildBlockingTaskMap,
+  getServiceTaskKey,
+  getTaskStatusLabel,
+  getTaskTypeLabel
+} from '@/utils/deployTask'
 import { enrichServiceMetrics } from '@/api/monitor'
 import { applyServiceLayout } from '@/utils/serviceLayout'
+import { useMinimumVisible } from '@/composables/useMinimumVisible'
 
 // 环境列表
 const environments = ref([])
@@ -70,8 +78,21 @@ const showGroupDialog = ref(false)
 const groupDialogMode = ref('create')
 const currentGroup = ref(null)
 const groupDialogLoading = ref(false)
+const showDeleteGroupConfirm = ref(false)
+const pendingDeleteGroup = ref(null)
 const layoutSaving = ref(false)
 const layoutDragging = ref(false)
+
+const deleteGroupConfirmMessage = computed(() => {
+  const group = pendingDeleteGroup.value
+  if (!group) return ''
+
+  if (group.serviceCount > 0) {
+    return `删除分组「${group.name}」后，其中 ${group.serviceCount} 个服务将移至「未分组」末尾，服务本身不会被删除。分组删除后无法恢复。`
+  }
+
+  return `确定删除分组「${group.name}」吗？分组删除后无法恢复。`
+})
 
 // 显示副本对话框
 const showReplicasDialog = ref(false)
@@ -94,17 +115,48 @@ const handleOpenLogs = () => {
   logsViewOpened.value = true
 }
 
-// 部署任务抽屉
+// 部署任务面板
 const showTaskDrawer = ref(false)
 const activeTaskCount = ref(0)
+const activeTasks = ref([])
 const taskDrawerRef = ref(null)
+const blockingTaskByServiceId = computed(() => buildBlockingTaskMap(activeTasks.value))
+const getBlockingTask = serviceId => {
+  const serviceKey = getServiceTaskKey(serviceId)
+  return serviceKey == null ? null : blockingTaskByServiceId.value.get(serviceKey) || null
+}
+const selectedServiceReadOnly = computed(() => Boolean(getBlockingTask(selectedService.value?.id)))
 
-const handleOpenTasks = () => {
-  showTaskDrawer.value = true
+const ensureServiceMutable = (service) => {
+  const blockingTask = getBlockingTask(service?.id)
+  if (!blockingTask) return true
+
+  const taskLabel = `${getTaskTypeLabel(blockingTask.taskType)}任务${getTaskStatusLabel(blockingTask.status)}`
+  toast.warning(`服务「${service.name}」的${taskLabel}，暂不可执行其他操作`)
+  return false
 }
 
-// 任务提交成功后：提示 + 打开抽屉并立即刷新
-const onTaskSubmitted = (taskId, message) => {
+const handleOpenTasks = () => {
+  showTaskDrawer.value = !showTaskDrawer.value
+}
+
+// 任务提交成功后：提示 + 打开任务面板并立即刷新
+const onTaskSubmitted = (taskId, message, taskContext = null) => {
+  if (taskContext?.serviceId != null) {
+    const optimisticTask = {
+      id: taskId,
+      serviceId: taskContext.serviceId,
+      serviceName: taskContext.serviceName,
+      taskType: taskContext.taskType,
+      status: 'PENDING'
+    }
+    activeTasks.value = [
+      optimisticTask,
+      ...activeTasks.value.filter(task => String(task.id) !== String(taskId))
+    ]
+    activeTaskCount.value = activeTasks.value.length
+  }
+
   toast.success(`${message}，任务 #${taskId} 已提交`)
   showTaskDrawer.value = true
   taskDrawerRef.value?.refresh()
@@ -192,10 +244,17 @@ const handleLogout = async () => {
 
 // 服务列表数据
 const services = ref([])
+const serviceLoadCount = ref(0)
+const serviceBlockingLoadCount = ref(0)
+const servicesLoading = computed(() => serviceLoadCount.value > 0)
+const servicesBlockingLoading = computed(() => serviceBlockingLoadCount.value > 0)
+const servicesRefreshing = computed(() => servicesLoading.value && !servicesBlockingLoading.value)
+const servicesBlockingLoadingVisible = useMinimumVisible(servicesBlockingLoading, 500)
+const servicesRefreshingVisible = useMinimumVisible(servicesRefreshing, 500)
 
 // 定时刷新相关
 let refreshTimer = null
-const REFRESH_INTERVAL = 10000 // 10秒
+const REFRESH_INTERVAL = 3000 // 与宿主机监控保持一致，每 3 秒刷新
 
 // 过滤后的服务列表
 const filteredServices = computed(() => {
@@ -317,7 +376,7 @@ const loadEnvironments = async () => {
 }
 
 // 加载服务列表
-const loadServices = async ({ force = false } = {}) => {
+const loadServices = async ({ force = false, blocking = false } = {}) => {
   if (!selectedEnv.value) {
     services.value = []
     serviceGroups.value = []
@@ -326,6 +385,8 @@ const loadServices = async ({ force = false } = {}) => {
   if (!force && (layoutDragging.value || layoutSaving.value)) return
 
   const environmentId = selectedEnv.value
+  serviceLoadCount.value += 1
+  if (blocking) serviceBlockingLoadCount.value += 1
   try {
     const [data, groups] = await Promise.all([
       listServices(environmentId),
@@ -375,6 +436,11 @@ const loadServices = async ({ force = false } = {}) => {
   } catch (error) {
     console.error('加载服务列表失败:', error)
     // 静默失败，避免定时刷新时频繁提示错误
+  } finally {
+    serviceLoadCount.value = Math.max(0, serviceLoadCount.value - 1)
+    if (blocking) {
+      serviceBlockingLoadCount.value = Math.max(0, serviceBlockingLoadCount.value - 1)
+    }
   }
 }
 
@@ -423,7 +489,8 @@ const startAutoRefresh = () => {
     // 如果有对话框打开，暂停刷新避免冲突
     if (!showEnvDialog.value && !showServiceDialog.value && 
         !showReplicasDialog.value && !showConfigDialog.value &&
-        !showGroupDialog.value && !layoutDragging.value && !layoutSaving.value) {
+        !showGroupDialog.value && !showDeleteGroupConfirm.value &&
+        !layoutDragging.value && !layoutSaving.value) {
       loadServices()
     }
   }, REFRESH_INTERVAL)
@@ -440,9 +507,12 @@ const stopAutoRefresh = () => {
 // 监听环境切换，重新加载服务列表并缓存选中的环境
 watch(selectedEnv, (newEnvId) => {
   // 立即移除旧环境数据；环境切换不能被拖拽/布局保存的刷新保护跳过
+  showDeleteGroupConfirm.value = false
+  pendingDeleteGroup.value = null
+  activeTasks.value = []
   services.value = []
   serviceGroups.value = []
-  loadServices({ force: true })
+  loadServices({ force: true, blocking: true })
   // 缓存选中的环境ID
   if (newEnvId) {
     localStorage.setItem('selectedEnvId', newEnvId)
@@ -477,7 +547,7 @@ onMounted(async () => {
   }
 
   await loadEnvironments()
-  await loadServices()
+  await loadServices({ blocking: true })
   startAutoRefresh()
 })
 
@@ -559,13 +629,21 @@ const handleConfirmGroup = async (name) => {
   }
 }
 
-const handleDeleteGroup = async (group) => {
+const handleDeleteGroup = (group) => {
   if (layoutDragging.value || layoutSaving.value) return
   const serviceCount = services.value.filter(service => service.groupId === group.id).length
-  const moveMessage = serviceCount > 0
-    ? `，其中 ${serviceCount} 个服务将移至「未分组」末尾`
-    : ''
-  if (!confirm(`确定删除分组「${group.name}」吗${moveMessage}？`)) return
+  pendingDeleteGroup.value = { ...group, serviceCount }
+  showDeleteGroupConfirm.value = true
+}
+
+const handleCancelDeleteGroup = () => {
+  pendingDeleteGroup.value = null
+}
+
+const handleConfirmDeleteGroup = async () => {
+  const group = pendingDeleteGroup.value
+  if (!group) return
+  pendingDeleteGroup.value = null
 
   try {
     await deleteServiceGroup(group.id)
@@ -605,12 +683,18 @@ const handleLayoutChange = async (layout) => {
 // 服务操作方法（均为异步：提交后返回任务ID，实际执行在后台队列）
 // 更新操作：仅变更镜像，其他服务配置由后端沿用数据库现值
 const updateService = async ({ service, dockerImage }) => {
+  if (!ensureServiceMutable(service)) return
+
   try {
     const taskId = await updateServiceApi(service.id, {
       name: service.name,
       dockerImage
     })
-    onTaskSubmitted(taskId, `服务「${service.name}」更新镜像至 ${dockerImage}`)
+    onTaskSubmitted(taskId, `服务「${service.name}」更新镜像至 ${dockerImage}`, {
+      serviceId: service.id,
+      serviceName: service.name,
+      taskType: 'UPDATE'
+    })
   } catch (error) {
     console.error('更新服务失败:', error)
     toast.error(error.message || '更新失败，请重试')
@@ -618,9 +702,15 @@ const updateService = async ({ service, dockerImage }) => {
 }
 
 const rollbackServiceHandler = async ({ service, version }) => {
+  if (!ensureServiceMutable(service)) return
+
   try {
     const taskId = await rollbackService(service.id, version)
-    onTaskSubmitted(taskId, `服务「${service.name}」回滚到 ${version}`)
+    onTaskSubmitted(taskId, `服务「${service.name}」回滚到 ${version}`, {
+      serviceId: service.id,
+      serviceName: service.name,
+      taskType: 'ROLLBACK'
+    })
   } catch (error) {
     console.error('回滚服务失败:', error)
     toast.error(error.message || '回滚失败，请重试')
@@ -628,9 +718,15 @@ const rollbackServiceHandler = async ({ service, version }) => {
 }
 
 const restartServiceHandler = async (service) => {
+  if (!ensureServiceMutable(service)) return
+
   try {
     const taskId = await restartService(service.id)
-    onTaskSubmitted(taskId, `服务「${service.name}」重启`)
+    onTaskSubmitted(taskId, `服务「${service.name}」重启`, {
+      serviceId: service.id,
+      serviceName: service.name,
+      taskType: 'RESTART'
+    })
   } catch (error) {
     console.error('重启服务失败:', error)
     toast.error(error.message || '重启失败，请重试')
@@ -638,9 +734,15 @@ const restartServiceHandler = async (service) => {
 }
 
 const stopServiceHandler = async (service) => {
+  if (!ensureServiceMutable(service)) return
+
   try {
     const taskId = await stopService(service.id)
-    onTaskSubmitted(taskId, `服务「${service.name}」停止`)
+    onTaskSubmitted(taskId, `服务「${service.name}」停止`, {
+      serviceId: service.id,
+      serviceName: service.name,
+      taskType: 'STOP'
+    })
   } catch (error) {
     console.error('停止服务失败:', error)
     toast.error(error.message || '停止失败，请重试')
@@ -648,9 +750,15 @@ const stopServiceHandler = async (service) => {
 }
 
 const scaleServiceHandler = async ({ service, replicas }) => {
+  if (!ensureServiceMutable(service)) return
+
   try {
     const taskId = await scaleService(service.id, replicas)
-    onTaskSubmitted(taskId, `服务「${service.name}」副本数调整为 ${replicas}`)
+    onTaskSubmitted(taskId, `服务「${service.name}」副本数调整为 ${replicas}`, {
+      serviceId: service.id,
+      serviceName: service.name,
+      taskType: 'SCALE'
+    })
   } catch (error) {
     console.error('调整副本失败:', error)
     toast.error(error.message || '调整副本失败，请重试')
@@ -663,21 +771,31 @@ const viewLogs = (service) => {
 }
 
 const editConfig = (service) => {
+  if (!ensureServiceMutable(service)) return
+
   currentService.value = service
   serviceDialogMode.value = 'edit'
   showServiceDialog.value = true
 }
 
 const copyService = (service) => {
+  if (!ensureServiceMutable(service)) return
+
   currentService.value = service
   serviceDialogMode.value = 'copy'
   showServiceDialog.value = true
 }
 
 const deleteServiceHandler = async (service) => {
+  if (!ensureServiceMutable(service)) return
+
   try {
     const taskId = await deleteServiceApi(service.id)
-    onTaskSubmitted(taskId, `服务「${service.name}」删除`)
+    onTaskSubmitted(taskId, `服务「${service.name}」删除`, {
+      serviceId: service.id,
+      serviceName: service.name,
+      taskType: 'DELETE'
+    })
   } catch (error) {
     console.error('删除服务失败:', error)
     toast.error(error.message || '删除失败，请重试')
@@ -696,11 +814,17 @@ const handleConfirmService = async (serviceData) => {
   const dialogMode = serviceDialogMode.value
   const serviceId = currentService.value?.id
 
+  if (dialogMode !== 'create' && !ensureServiceMutable(currentService.value)) return
+
   try {
     if (dialogMode === 'edit') {
       // 编辑服务
       const taskId = await updateServiceApi(serviceId, serviceData)
-      onTaskSubmitted(taskId, `服务「${serviceData.name}」修改`)
+      onTaskSubmitted(taskId, `服务「${serviceData.name}」修改`, {
+        serviceId,
+        serviceName: serviceData.name,
+        taskType: 'UPDATE'
+      })
     } else {
       // 新增服务
       const taskId = await createServiceApi(serviceData)
@@ -731,6 +855,7 @@ const handleConfirmService = async (serviceData) => {
       :selected-env="selectedEnv"
       :current-user="currentUser"
       :active-task-count="activeTaskCount"
+      :tasks-open="showTaskDrawer"
       @update:selectedEnv="selectedEnv = $event"
       @add-environment="handleAddEnvironment"
       @delete-environment="handleDeleteEnvironment"
@@ -743,113 +868,144 @@ const handleConfirmService = async (serviceData) => {
 
     <!-- 主内容区（部署视图） -->
     <main v-show="activeView === 'deploy'" class="main-content">
-      <!-- 宿主机监控条 -->
-      <HostMetricStrip
-        :environment-id="selectedEnv"
-        @host-click="handleHostClick"
-      />
-
-      <!-- 搜索和操作栏 -->
-      <div class="toolbar">
-        <div class="search-box">
-          <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8"/>
-            <path d="m21 21-4.35-4.35"/>
-          </svg>
-          <input 
-            v-model="searchKeyword"
-            type="text" 
-            placeholder="搜索服务名称或描述..."
-            class="search-input"
+      <aside
+        class="monitor-sidebar"
+        :class="{ 'tasks-visible': showTaskDrawer }"
+        aria-label="运行状态"
+      >
+        <HostMetricStrip
+          :environment-id="selectedEnv"
+          @host-click="handleHostClick"
+        />
+        <div v-show="showTaskDrawer" class="task-sidebar">
+          <TaskDrawer
+            ref="taskDrawerRef"
+            :visible="showTaskDrawer"
+            :environment-id="selectedEnv"
+            @update:visible="showTaskDrawer = $event"
+            @update:activeCount="activeTaskCount = $event"
+            @update:activeTasks="activeTasks = $event"
+            @task-finished="handleTaskFinished"
           />
         </div>
-        
-        <div class="toolbar-actions">
-          <button 
-            class="status-filter-btn"
-            :class="{ active: selectedStatus === 'all' }"
-            @click="selectedStatus = 'all'"
-          >
-            全部
-            <span class="count">{{ statusCounts.all }}</span>
-          </button>
-          <button 
-            class="status-filter-btn"
-            :class="{ active: selectedStatus === 'running' }"
-            @click="selectedStatus = 'running'"
-          >
-            运行中
-            <span class="count success">{{ statusCounts.running }}</span>
-          </button>
-          <button 
-            class="status-filter-btn"
-            :class="{ active: selectedStatus === 'deploying' }"
-            @click="selectedStatus = 'deploying'"
-          >
-            部署中
-            <span class="count warning">{{ statusCounts.deploying }}</span>
-          </button>
-          <button 
-            class="status-filter-btn"
-            :class="{ active: selectedStatus === 'stopped' }"
-            @click="selectedStatus = 'stopped'"
-          >
-            已停止
-            <span class="count neutral">{{ statusCounts.stopped }}</span>
-          </button>
-          <button
-            class="btn btn-secondary"
-            :disabled="layoutDragging || layoutSaving"
-            @click="openCreateGroupDialog"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M3 7h7l2 2h9v10H3z"/>
-              <path d="M12 12v4M10 14h4"/>
+      </aside>
+
+      <section class="service-workspace" aria-label="服务管理">
+        <!-- 搜索和操作栏 -->
+        <div class="toolbar">
+          <div class="search-box">
+            <svg class="search-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="m21 21-4.35-4.35"/>
             </svg>
-            新建分组
-          </button>
-          <button class="btn btn-primary" @click="handleAddService">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="12" y1="5" x2="12" y2="19"/>
-              <line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-            新增服务
-          </button>
+            <input
+              v-model="searchKeyword"
+              type="text"
+              placeholder="搜索服务名称或描述..."
+              class="search-input"
+            />
+            <span
+              class="workspace-refresh-indicator"
+              :class="{ visible: servicesRefreshingVisible }"
+              role="status"
+              :aria-hidden="!servicesRefreshingVisible"
+              aria-label="服务数据刷新中"
+            >
+              <span class="workspace-refresh-spinner" aria-hidden="true"></span>
+              正在刷新
+            </span>
+          </div>
+
+          <div class="toolbar-actions">
+            <button
+              class="status-filter-btn"
+              :class="{ active: selectedStatus === 'all' }"
+              @click="selectedStatus = 'all'"
+            >
+              全部
+              <span class="count">{{ statusCounts.all }}</span>
+            </button>
+            <button
+              class="status-filter-btn"
+              :class="{ active: selectedStatus === 'running' }"
+              @click="selectedStatus = 'running'"
+            >
+              运行中
+              <span class="count success">{{ statusCounts.running }}</span>
+            </button>
+            <button
+              class="status-filter-btn"
+              :class="{ active: selectedStatus === 'deploying' }"
+              @click="selectedStatus = 'deploying'"
+            >
+              部署中
+              <span class="count warning">{{ statusCounts.deploying }}</span>
+            </button>
+            <button
+              class="status-filter-btn"
+              :class="{ active: selectedStatus === 'stopped' }"
+              @click="selectedStatus = 'stopped'"
+            >
+              已停止
+              <span class="count neutral">{{ statusCounts.stopped }}</span>
+            </button>
+            <button
+              class="btn btn-secondary"
+              :disabled="layoutDragging || layoutSaving"
+              @click="openCreateGroupDialog"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 7h7l2 2h9v10H3z"/>
+                <path d="M12 12v4M10 14h4"/>
+              </svg>
+              新建分组
+            </button>
+            <button class="btn btn-primary" @click="handleAddService">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"/>
+                <line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              新增服务
+            </button>
+          </div>
         </div>
-      </div>
 
-      <ServiceGroupBoard
-        v-if="selectedEnv && shouldShowServiceBoard"
-        :environment-id="selectedEnv"
-        :services="filteredServices"
-        :groups="serviceGroups"
-        :drag-disabled="hasActiveServiceFilter"
-        :layout-saving="layoutSaving"
-        @layout-change="handleLayoutChange"
-        @dragging-change="layoutDragging = $event"
-        @rename-group="openRenameGroupDialog"
-        @delete-group="handleDeleteGroup"
-        @update="updateService"
-        @rollback="rollbackServiceHandler"
-        @restart="restartServiceHandler"
-        @stop="stopServiceHandler"
-        @scale="scaleServiceHandler"
-        @view="viewLogs"
-        @edit="editConfig"
-        @copy="copyService"
-        @delete="deleteServiceHandler"
-      />
+        <ServiceGroupBoard
+          v-if="selectedEnv && (shouldShowServiceBoard || servicesBlockingLoadingVisible)"
+          :environment-id="selectedEnv"
+          :services="filteredServices"
+          :groups="serviceGroups"
+          :loading="servicesBlockingLoadingVisible"
+          :drag-disabled="hasActiveServiceFilter"
+          :layout-saving="layoutSaving"
+          :blocking-task-by-service-id="blockingTaskByServiceId"
+          @layout-change="handleLayoutChange"
+          @dragging-change="layoutDragging = $event"
+          @rename-group="openRenameGroupDialog"
+          @delete-group="handleDeleteGroup"
+          @update="updateService"
+          @rollback="rollbackServiceHandler"
+          @restart="restartServiceHandler"
+          @stop="stopServiceHandler"
+          @scale="scaleServiceHandler"
+          @view="viewLogs"
+          @edit="editConfig"
+          @copy="copyService"
+          @delete="deleteServiceHandler"
+        />
 
-      <!-- 空状态 -->
-      <div v-if="!shouldShowServiceBoard" class="empty-state">
-        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M8 15h8M9 9h.01M15 9h.01"/>
-        </svg>
-        <h3>未找到服务</h3>
-        <p v-if="hasActiveServiceFilter">当前搜索或状态条件下没有匹配的服务</p>
-        <p v-else>当前环境还没有服务，可以先新增服务或创建分组</p>
-      </div>
+        <!-- 空状态 -->
+        <div v-if="!servicesBlockingLoadingVisible && !shouldShowServiceBoard" class="empty-state">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M8 15h8M9 9h.01M15 9h.01"/>
+          </svg>
+          <h3>未找到服务</h3>
+          <p v-if="hasActiveServiceFilter">当前搜索或状态条件下没有匹配的服务</p>
+          <p v-else>当前环境还没有服务，可以先新增服务或创建分组</p>
+        </div>
+      </section>
+
     </main>
 
     <!-- 日志视图（首次打开才挂载，之后 v-show 保留查询现场） -->
@@ -889,11 +1045,20 @@ const handleConfirmService = async (serviceData) => {
       @close="closeGroupDialog"
       @confirm="handleConfirmGroup"
     />
+
+    <ConfirmDialog
+      v-model:visible="showDeleteGroupConfirm"
+      title="确认删除分组"
+      :message="deleteGroupConfirmMessage"
+      @confirm="handleConfirmDeleteGroup"
+      @cancel="handleCancelDeleteGroup"
+    />
     
     <!-- 副本对话框 -->
     <ReplicasDialog
       :visible="showReplicasDialog"
       :service="selectedService || {}"
+      :read-only="selectedServiceReadOnly"
       @update:visible="showReplicasDialog = $event"
     />
     
@@ -919,15 +1084,6 @@ const handleConfirmService = async (serviceData) => {
       @update:visible="showHostDetail = $event"
     />
 
-    <!-- 部署任务抽屉 -->
-    <TaskDrawer
-      ref="taskDrawerRef"
-      :visible="showTaskDrawer"
-      :environment-id="selectedEnv"
-      @update:visible="showTaskDrawer = $event"
-      @update:activeCount="activeTaskCount = $event"
-      @task-finished="handleTaskFinished"
-    />
   </div>
 </template>
 
@@ -939,9 +1095,53 @@ const handleConfirmService = async (serviceData) => {
 
 /* 主内容区 */
 .main-content {
-  max-width: 1400px;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  align-items: start;
+  gap: 1.5rem;
+  max-width: var(--content-max-width);
   margin: 0 auto;
   padding: 2rem;
+}
+
+.monitor-sidebar {
+  position: sticky;
+  top: calc(68px + 2rem);
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+  max-height: calc(100vh - 68px - 4rem);
+}
+
+.monitor-sidebar.tasks-visible {
+  height: calc(100vh - 68px - 4rem);
+  grid-template-rows: minmax(210px, 0.85fr) minmax(260px, 1.15fr);
+}
+
+.monitor-sidebar > :deep(.host-strip) {
+  min-height: 0;
+  max-height: 100%;
+}
+
+.task-sidebar {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.task-sidebar > :deep(.task-panel) {
+  height: 100%;
+}
+
+@media (min-width: 1101px) {
+  .monitor-sidebar.tasks-visible > :deep(.host-strip) {
+    container-name: host-strip;
+    container-type: size;
+  }
+}
+
+.service-workspace {
+  min-width: 0;
 }
 
 /* 日志视图：隐藏 header，占满整个视口 */
@@ -954,10 +1154,17 @@ const handleConfirmService = async (serviceData) => {
 
 /* 工具栏 */
 .toolbar {
+  position: sticky;
+  top: 68px;
+  z-index: 50;
   display: flex;
   gap: 1rem;
-  margin-bottom: 2rem;
+  margin-bottom: 1.25rem;
+  padding: 0.75rem 0;
   flex-wrap: wrap;
+  background: var(--bg-primary);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  box-shadow: 0 10px 18px -18px color-mix(in srgb, var(--text-primary) 45%, transparent);
 }
 
 .search-box {
@@ -976,7 +1183,7 @@ const handleConfirmService = async (serviceData) => {
 
 .search-input {
   width: 100%;
-  padding: 0.625rem 1rem 0.625rem 3rem;
+  padding: 0.625rem 7.5rem 0.625rem 3rem;
   border: 2px solid var(--border-color);
   border-radius: 10px;
   background: var(--bg-secondary);
@@ -984,6 +1191,41 @@ const handleConfirmService = async (serviceData) => {
   font-size: 0.95rem;
   transition: all 0.2s;
   height: 40px;
+}
+
+.workspace-refresh-indicator {
+  position: absolute;
+  top: 50%;
+  right: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--primary-color);
+  font-size: 0.75rem;
+  font-weight: 600;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-50%);
+  transition: opacity 0.15s ease, visibility 0.15s ease;
+}
+
+.workspace-refresh-indicator.visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+.workspace-refresh-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--primary-color) 24%, transparent);
+  border-top-color: var(--primary-color);
+  border-radius: 50%;
+  animation: workspace-refresh-spin 0.7s linear infinite;
+}
+
+@keyframes workspace-refresh-spin {
+  to { transform: rotate(360deg); }
 }
 
 .search-input:focus {
@@ -995,6 +1237,7 @@ const handleConfirmService = async (serviceData) => {
   display: flex;
   gap: 0.75rem;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .status-filter-btn {
@@ -1459,15 +1702,28 @@ const handleConfirmService = async (serviceData) => {
 }
 
 /* 响应式设计 */
-@media (max-width: 768px) {
-  .header-content {
-    padding: 0 1rem;
+@media (max-width: 1100px) {
+  .main-content {
+    grid-template-columns: minmax(0, 1fr);
   }
-  
+
+  .monitor-sidebar {
+    position: static;
+    height: auto;
+    max-height: none;
+  }
+
+  .monitor-sidebar.tasks-visible {
+    height: auto;
+    grid-template-rows: auto minmax(320px, 520px);
+  }
+}
+
+@media (max-width: 768px) {
   .main-content {
     padding: 1rem;
   }
-  
+
   .nav-menu {
     display: none;
   }
@@ -1482,6 +1738,16 @@ const handleConfirmService = async (serviceData) => {
   
   .search-box {
     min-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-refresh-indicator {
+    transition: none;
+  }
+
+  .workspace-refresh-spinner {
+    animation: none;
   }
 }
 </style>

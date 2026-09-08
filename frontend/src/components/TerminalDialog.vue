@@ -4,12 +4,15 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { getToken } from '@/utils/auth'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
   serviceId: { type: [Number, String], default: null },
   replica: { type: Object, default: () => ({}) }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible'])
 
@@ -121,12 +124,10 @@ const teardown = () => {
 
 watch(() => props.visible, async (val) => {
   if (val) {
-    document.body.style.overflow = 'hidden'
     await nextTick()
     initTerminal()
     connect()
   } else {
-    document.body.style.overflow = ''
     teardown()
   }
 })
@@ -136,7 +137,6 @@ const handleClose = () => {
 }
 
 onUnmounted(() => {
-  document.body.style.overflow = ''
   teardown()
 })
 </script>

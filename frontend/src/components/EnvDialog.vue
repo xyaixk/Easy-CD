@@ -1,5 +1,6 @@
 <script setup>
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, watch } from 'vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -7,6 +8,8 @@ const props = defineProps({
     default: false
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible', 'confirm'])
 
@@ -34,10 +37,7 @@ const handleClose = () => {
 
 watch(() => props.visible, (val) => {
   if (val) {
-    document.body.style.overflow = 'hidden'
     resetForm()
-  } else {
-    document.body.style.overflow = ''
   }
 })
 
@@ -52,9 +52,6 @@ const handleConfirm = () => {
   handleClose()
 }
 
-onUnmounted(() => {
-  document.body.style.overflow = ''
-})
 </script>
 
 <template>

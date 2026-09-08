@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ImageUpdateDialog from './ImageUpdateDialog.vue'
 import RollbackDialog from './RollbackDialog.vue'
@@ -9,6 +9,10 @@ const props = defineProps({
   service: {
     type: Object,
     required: true
+  },
+  readOnly: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -21,6 +25,7 @@ const showImageUpdateDialog = ref(false)
 const showRollbackDialog = ref(false)
 const showScaleDialog = ref(false)
 const pendingAction = ref(null)
+const blockedActionTitle = '服务任务处理中，暂不可执行此操作'
 
 const actionMessages = {
   restart: { title: '确认重启', message: '确定要重启此服务吗？' },
@@ -30,6 +35,8 @@ const actionMessages = {
 
 const handleAction = (action) => {
   showMenu.value = false
+
+  if (props.readOnly && action !== 'view') return
   
   // 查看、编辑、复制直接触发，不需要确认
   if (['view', 'edit', 'copy'].includes(action)) {
@@ -61,6 +68,7 @@ const handleAction = (action) => {
 }
 
 const handleConfirm = () => {
+  if (props.readOnly) return
   if (pendingAction.value) {
     emit(pendingAction.value)
     pendingAction.value = null
@@ -72,14 +80,17 @@ const handleCancelConfirm = () => {
 }
 
 const handleRollbackConfirm = (version) => {
+  if (props.readOnly) return
   emit('rollback', { service: props.service, version })
 }
 
 const handleImageUpdateConfirm = (dockerImage) => {
+  if (props.readOnly) return
   emit('update', { service: props.service, dockerImage })
 }
 
 const handleScaleConfirm = (replicas) => {
+  if (props.readOnly) return
   emit('scale', { service: props.service, replicas })
 }
 
@@ -105,6 +116,17 @@ const handleClickOutside = (event) => {
 const handleCloseAllMenus = () => {
   showMenu.value = false
 }
+
+watch(() => props.readOnly, (readOnly) => {
+  if (!readOnly) return
+
+  showMenu.value = false
+  showConfirmDialog.value = false
+  showImageUpdateDialog.value = false
+  showRollbackDialog.value = false
+  showScaleDialog.value = false
+  pendingAction.value = null
+})
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
@@ -135,6 +157,8 @@ onUnmounted(() => {
       <div class="action-grid">
         <button 
           class="grid-item"
+          :disabled="readOnly"
+          :title="readOnly ? blockedActionTitle : ''"
           @click="handleAction('restart')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -144,7 +168,8 @@ onUnmounted(() => {
         </button>
         <button 
           class="grid-item"
-          :disabled="service.status === 'deploying'"
+          :disabled="readOnly || service.status === 'deploying'"
+          :title="readOnly ? blockedActionTitle : ''"
           @click="handleAction('update')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -155,7 +180,8 @@ onUnmounted(() => {
         </button>
         <button 
           class="grid-item"
-          :disabled="service.status === 'stopped'"
+          :disabled="readOnly || service.status === 'stopped'"
+          :title="readOnly ? blockedActionTitle : ''"
           @click="handleAction('rollback')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -166,8 +192,8 @@ onUnmounted(() => {
         </button>
         <button 
           class="grid-item"
-          :disabled="service.status === 'stopped' || service.serviceMode === 'global'"
-          :title="service.serviceMode === 'global' ? 'global 模式不支持手动调整副本数' : ''"
+          :disabled="readOnly || service.status === 'stopped' || service.serviceMode === 'global'"
+          :title="readOnly ? blockedActionTitle : (service.serviceMode === 'global' ? 'global 模式不支持手动调整副本数' : '')"
           @click="handleAction('scale')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -189,6 +215,8 @@ onUnmounted(() => {
         </button>
         <button 
           class="grid-item"
+          :disabled="readOnly"
+          :title="readOnly ? blockedActionTitle : ''"
           @click="handleAction('edit')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -199,6 +227,8 @@ onUnmounted(() => {
         </button>
         <button
           class="grid-item"
+          :disabled="readOnly"
+          :title="readOnly ? blockedActionTitle : ''"
           @click="handleAction('copy')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -209,7 +239,8 @@ onUnmounted(() => {
         </button>
         <button 
           class="grid-item"
-          :disabled="service.status === 'stopped'"
+          :disabled="readOnly || service.status === 'stopped'"
+          :title="readOnly ? blockedActionTitle : ''"
           @click="handleAction('stop')"
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -217,7 +248,12 @@ onUnmounted(() => {
           </svg>
           <span>停止</span>
         </button>
-        <button class="grid-item danger" @click="handleAction('delete')">
+        <button
+          class="grid-item danger"
+          :disabled="readOnly"
+          :title="readOnly ? blockedActionTitle : ''"
+          @click="handleAction('delete')"
+        >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
           </svg>

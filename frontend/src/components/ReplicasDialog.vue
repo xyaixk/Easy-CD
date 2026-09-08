@@ -4,6 +4,7 @@ import { getServiceReplicas } from '@/api/service'
 import { enrichWithMockMetrics } from '@/api/monitor'
 import LogViewerDialog from './LogViewerDialog.vue'
 import SparkLine from './monitor/SparkLine.vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 // 终端组件按需加载（xterm 体积大，拆到独立 chunk）
 const TerminalDialog = defineAsyncComponent(() => import('./TerminalDialog.vue'))
@@ -16,8 +17,14 @@ const props = defineProps({
   service: {
     type: Object,
     required: true
+  },
+  readOnly: {
+    type: Boolean,
+    default: false
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible'])
 
@@ -46,6 +53,12 @@ const selectedReplica = ref(null)
 // Web 终端对话框（进入容器）
 const showTerminal = ref(false)
 const terminalReplica = ref(null)
+
+watch(() => props.readOnly, (readOnly) => {
+  if (!readOnly) return
+  showTerminal.value = false
+  terminalReplica.value = null
+})
 
 // Docker 运行参数展开状态（默认收起）
 const showDockerParams = ref(false)
@@ -184,13 +197,11 @@ const REFRESH_INTERVAL = 10000 // 10秒刷新一次
 // 监听对话框显示状态
 watch(() => props.visible, (val) => {
   if (val) {
-    document.body.style.overflow = 'hidden'
     showDockerParams.value = false
     activeParamGroup.value = ''
     loadReplicas()
     startAutoRefresh()
   } else {
-    document.body.style.overflow = ''
     stopAutoRefresh()
   }
 })
@@ -294,7 +305,8 @@ const handleViewServiceLogs = () => {
 }
 
 // 进入容器：打开 Web 终端（需要副本在运行中且已采到容器 ID）
-const canEnterContainer = (replica) => replica.status === 'running' && !!replica.containerId
+const canEnterContainer = (replica) =>
+  !props.readOnly && replica.status === 'running' && !!replica.containerId
 
 const handleEnterContainer = (replica) => {
   if (!canEnterContainer(replica)) return
@@ -321,7 +333,6 @@ const memHint = (replica) => {
 }
 
 onUnmounted(() => {
-  document.body.style.overflow = ''
   stopAutoRefresh()
 })
 </script>
@@ -340,7 +351,7 @@ onUnmounted(() => {
                   <line x1="12" y1="22.08" x2="12" y2="12"/>
                 </svg>
               </div>
-              <h3>{{ service.name }} - 副本列表</h3>
+              <h3>{{ service.name }}</h3>
             </div>
             <button class="btn-close" @click="handleClose">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -471,7 +482,9 @@ onUnmounted(() => {
                         class="btn-icon" 
                         @click="handleEnterContainer(replica)"
                         :disabled="!canEnterContainer(replica)"
-                        :title="canEnterContainer(replica) ? '进入容器终端' : '副本未运行或容器 ID 未采集，暂不可进入'"
+                        :title="readOnly
+                          ? '服务任务处理中，暂不可进入容器终端'
+                          : (canEnterContainer(replica) ? '进入容器终端' : '副本未运行或容器 ID 未采集，暂不可进入')"
                       >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <polyline points="4 17 10 11 4 5"/>
@@ -560,6 +573,7 @@ onUnmounted(() => {
     
     <!-- 日志查看对话框 -->
     <LogViewerDialog
+      v-if="service?.id != null"
       :visible="showLogViewer"
       :replica="selectedReplica || {}"
       :service-id="service.id"
@@ -568,7 +582,8 @@ onUnmounted(() => {
 
     <!-- Web 终端（进入容器） -->
     <TerminalDialog
-      :visible="showTerminal"
+      v-if="service?.id != null"
+      :visible="showTerminal && !readOnly"
       :service-id="service.id"
       :replica="terminalReplica || {}"
       @update:visible="showTerminal = $event"
@@ -1234,5 +1249,89 @@ onUnmounted(() => {
 .dialog-fade-leave-to .dialog-container {
   transform: scale(0.9);
   opacity: 0;
+}
+
+@media (max-width: 640px) {
+  .dialog-overlay {
+    padding: 0.5rem;
+  }
+
+  .dialog-container {
+    max-height: calc(100vh - 1rem);
+    border-radius: 12px;
+  }
+
+  .dialog-header {
+    padding: 0.75rem;
+  }
+
+  .header-content {
+    min-width: 0;
+    gap: 0.625rem;
+  }
+
+  .dialog-header h3 {
+    min-width: 0;
+    font-size: 1rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dialog-body {
+    padding: 0.75rem;
+  }
+
+  .replicas-summary {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 1rem;
+  }
+
+  .summary-item:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .btn-view-logs {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .docker-params-section {
+    margin: 0 0 1rem;
+  }
+
+  .replica-card {
+    padding: 0.875rem;
+  }
+
+  .replica-header {
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .replica-header-right {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
+  .replica-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-value {
+    overflow-wrap: anywhere;
+  }
+
+  .replica-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dialog-footer {
+    padding: 0.75rem;
+  }
 }
 </style>

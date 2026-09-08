@@ -1,5 +1,6 @@
 <script setup>
 import { nextTick, ref, watch } from 'vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -11,6 +12,8 @@ const props = defineProps({
     default: ''
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible', 'update:modelValue', 'submit'])
 const textareaRef = ref(null)

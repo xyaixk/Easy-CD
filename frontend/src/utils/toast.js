@@ -7,8 +7,12 @@ function createToast(options) {
   const container = document.createElement('div')
   container.style.cssText = `
     position: fixed;
+    left: 20px;
     right: 20px;
     z-index: 10000;
+    display: flex;
+    justify-content: flex-end;
+    pointer-events: none;
     transition: all 0.3s ease;
   `
   document.body.appendChild(container)

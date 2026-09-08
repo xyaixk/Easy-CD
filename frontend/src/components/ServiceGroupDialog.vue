@@ -1,5 +1,6 @@
 <script setup>
 import { nextTick, ref, watch } from 'vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -19,6 +20,8 @@ const props = defineProps({
     default: false
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['close', 'confirm'])
 const name = ref('')

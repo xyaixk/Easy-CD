@@ -10,6 +10,8 @@ import com.easy.cd.entity.ReplicaStatus;
 import com.easy.cd.mapper.EnvironmentMapper;
 import com.easy.cd.mapper.ReplicaStatusMapper;
 import com.easy.cd.mapper.ServiceMapper;
+import com.easy.cd.monitor.discovery.NodeDiscoveryService;
+import com.easy.cd.monitor.discovery.NodeDiscoveryService.NodeInfo;
 import com.easy.cd.util.SshExecutor;
 import com.easy.cd.util.SshExecutor.SshHost;
 import com.easy.cd.util.SshExecutor.SshResult;
@@ -47,6 +49,9 @@ public class ReplicaStatusRefreshTask {
 
     @Resource
     private SshExecutor sshExecutor;
+
+    @Resource
+    private NodeDiscoveryService nodeDiscoveryService;
 
     @Scheduled(fixedRateString = "${monitor.collector.interval-ms:10000}", initialDelay = 5000)
     public void refreshReplicaStatus() {
@@ -104,6 +109,7 @@ public class ReplicaStatusRefreshTask {
             for (TaskInfo task : allTasks) {
                 task.serviceName = resolveTaskServiceName(task.name, serviceByName.keySet());
             }
+            fillNodeIps(environment, allTasks);
             fillContainerIds(sshHosts, allTasks);
 
             Map<String, List<TaskInfo>> tasksByService = allTasks.stream()
@@ -150,6 +156,7 @@ public class ReplicaStatusRefreshTask {
                 rs.setPlatform("docker");
                 rs.setStatus(extractStatus(task.currentState));
                 rs.setNodeName(task.node);
+                rs.setNodeIp(task.nodeIp);
                 rs.setTaskId(task.id);
                 rs.setTaskSlot(task.slot);
                 rs.setContainerId(task.containerId);
@@ -193,6 +200,30 @@ public class ReplicaStatusRefreshTask {
             }
         }
         return tasks;
+    }
+
+    /**
+     * 根据 Swarm 节点名补齐节点 IP，供终端连接到容器实际所在节点。
+     */
+    private void fillNodeIps(Environment environment, List<TaskInfo> tasks) {
+        if (tasks.isEmpty()) return;
+
+        Map<String, String> nodeIps = new HashMap<>();
+        for (NodeInfo node : nodeDiscoveryService.discover(environment)) {
+            if (node == null || node.getIp() == null || node.getIp().trim().isEmpty()) continue;
+            if (node.getHostname() != null && !node.getHostname().trim().isEmpty()) {
+                nodeIps.put(node.getHostname().trim().toLowerCase(Locale.ROOT), node.getIp().trim());
+            }
+            if (node.getNodeId() != null && !node.getNodeId().trim().isEmpty()) {
+                nodeIps.put(node.getNodeId().trim().toLowerCase(Locale.ROOT), node.getIp().trim());
+            }
+        }
+
+        for (TaskInfo task : tasks) {
+            if (task.node != null) {
+                task.nodeIp = nodeIps.get(task.node.trim().toLowerCase(Locale.ROOT));
+            }
+        }
     }
 
     /**
@@ -314,7 +345,7 @@ public class ReplicaStatusRefreshTask {
     }
 
     private static class TaskInfo {
-        String id, name, node, desiredState, currentState;
+        String id, name, node, nodeIp, desiredState, currentState;
         String serviceName;
         String containerId;
         String error;

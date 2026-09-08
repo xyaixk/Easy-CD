@@ -71,21 +71,54 @@ public class SshExecutor {
      * 命令执行结果
      */
     public static class SshResult {
+        public enum FailureType {
+            NONE,
+            CONNECTION,
+            TIMEOUT,
+            EXECUTION
+        }
+
         private int exitCode;
         private String stdout;
         private String stderr;
+        private FailureType failureType;
 
         public SshResult(int exitCode, String stdout, String stderr) {
+            this(exitCode, stdout, stderr,
+                    exitCode < 0 ? FailureType.CONNECTION : FailureType.NONE);
+        }
+
+        private SshResult(int exitCode, String stdout, String stderr, FailureType failureType) {
             this.exitCode = exitCode;
             this.stdout = stdout;
             this.stderr = stderr;
+            this.failureType = failureType;
+        }
+
+        public static SshResult connectionFailure(String message) {
+            return new SshResult(-1, "", message, FailureType.CONNECTION);
+        }
+
+        public static SshResult timeout(String message) {
+            return timeout("", message);
+        }
+
+        private static SshResult timeout(String stdout, String message) {
+            return new SshResult(-2, stdout, message, FailureType.TIMEOUT);
+        }
+
+        private static SshResult executionFailure(String stdout, String message) {
+            return new SshResult(-3, stdout, message, FailureType.EXECUTION);
         }
 
         public int getExitCode() { return exitCode; }
         public String getStdout() { return stdout; }
         public String getStderr() { return stderr; }
+        public FailureType getFailureType() { return failureType; }
 
         public boolean isSuccess() { return exitCode == 0; }
+        public boolean isConnectionFailure() { return failureType == FailureType.CONNECTION; }
+        public boolean isTimeout() { return failureType == FailureType.TIMEOUT; }
 
         /** stdout 为空或全是空白时为 true */
         public boolean hasOutput() { return stdout != null && !stdout.trim().isEmpty(); }
@@ -141,8 +174,18 @@ public class SshExecutor {
      * 在单台主机上执行命令（指定超时）
      */
     public SshResult executeCommand(SshHost host, String command, int timeoutMs) {
+        return executeCommandInternal(host, command, timeoutMs, true);
+    }
+
+    private SshResult executeCommandQuiet(SshHost host, String command, int timeoutMs) {
+        return executeCommandInternal(host, command, timeoutMs, false);
+    }
+
+    private SshResult executeCommandInternal(SshHost host, String command, int timeoutMs,
+                                             boolean captureTaskLog) {
         Session session = null;
         ChannelExec channel = null;
+        boolean commandStarted = false;
         logCommand(host, command);
         try {
             session = getOrCreateSession(host);
@@ -158,9 +201,11 @@ public class SshExecutor {
             InputStream err = channel.getExtInputStream();
 
             channel.connect(CONNECT_TIMEOUT);
+            commandStarted = true;
 
             byte[] buf = new byte[8192];
             long startTime = System.currentTimeMillis();
+            boolean timedOut = false;
             while (true) {
                 while (in.available() > 0) {
                     int i = in.read(buf, 0, buf.length);
@@ -179,35 +224,70 @@ public class SshExecutor {
                 }
                 if (System.currentTimeMillis() - startTime > timeoutMs) {
                     log.warn("SSH命令执行超时 ({}ms): {}", timeoutMs, command);
+                    timedOut = true;
                     break;
                 }
                 Thread.sleep(50);
             }
 
-            int exitCode = channel.getExitStatus();
             String stdout = stdoutStream.toString("UTF-8");
             String stderr = stderrStream.toString("UTF-8");
+            SshResult sshResult;
 
-            if (exitCode != 0) {
-                log.debug("SSH命令退出码非零: exitCode={}, cmd={}, stderr={}", exitCode, command, stderr);
+            if (timedOut) {
+                sshResult = SshResult.timeout(stdout,
+                        appendError(stderr, "SSH命令执行超时 (" + timeoutMs + "ms)"));
+            } else {
+                int exitCode = channel.getExitStatus();
+                if (exitCode < 0) {
+                    sshResult = SshResult.executionFailure(stdout,
+                            appendError(stderr, "SSH命令结束但未返回退出码"));
+                } else {
+                    if (exitCode != 0) {
+                        log.debug("SSH命令退出码非零: exitCode={}, cmd={}, stderr={}", exitCode, command, stderr);
+                    }
+                    sshResult = new SshResult(exitCode, stdout, stderr);
+                }
             }
 
-            SshResult sshResult = new SshResult(exitCode, stdout, stderr);
-            appendTaskLog(host, command, sshResult);
+            if (captureTaskLog) {
+                appendTaskLog(host, command, sshResult);
+            }
             return sshResult;
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            invalidateSession(host);
+            SshResult failResult = commandStarted
+                    ? SshResult.executionFailure("", "SSH命令执行被中断")
+                    : SshResult.connectionFailure("SSH连接被中断");
+            if (captureTaskLog) {
+                appendTaskLog(host, command, failResult);
+            }
+            return failResult;
         } catch (Exception e) {
             log.warn("SSH命令执行失败: host={}, cmd={}, error={}", host.getKey(), command, e.getMessage());
             // 连接异常时移除缓存的 Session
             invalidateSession(host);
-            SshResult failResult = new SshResult(-1, "", e.getMessage());
-            appendTaskLog(host, command, failResult);
+            SshResult failResult = commandStarted
+                    ? SshResult.executionFailure("", e.getMessage())
+                    : SshResult.connectionFailure(e.getMessage());
+            if (captureTaskLog) {
+                appendTaskLog(host, command, failResult);
+            }
             return failResult;
         } finally {
             if (channel != null && channel.isConnected()) {
                 channel.disconnect();
             }
         }
+    }
+
+    private String appendError(String stderr, String message) {
+        if (stderr == null || stderr.trim().isEmpty()) {
+            return message;
+        }
+        return stderr.trim() + System.lineSeparator() + message;
     }
 
     /**
@@ -239,33 +319,50 @@ public class SshExecutor {
      * 带故障转移的命令执行（指定超时，供部署类长耗时命令使用）
      */
     public SshResult executeCommandWithFailover(List<SshHost> hosts, String command, int timeoutMs) {
+        return executeCommandWithFailover(hosts, command, timeoutMs, true);
+    }
+
+    /**
+     * 轮询类命令入口：保留服务日志中的状态变化，避免把每次 SSH 查询结果写入任务日志。
+     */
+    public SshResult executeCommandWithFailoverQuiet(List<SshHost> hosts, String command, int timeoutMs) {
+        return executeCommandWithFailover(hosts, command, timeoutMs, false);
+    }
+
+    private SshResult executeCommandWithFailover(List<SshHost> hosts, String command, int timeoutMs,
+                                                 boolean captureTaskLog) {
         if (hosts == null || hosts.isEmpty()) {
-            return new SshResult(-1, "", "SSH 主机列表为空");
+            return SshResult.connectionFailure("SSH 主机列表为空");
         }
 
         List<SshHost> shuffled = new ArrayList<>(hosts);
         Collections.shuffle(shuffled);
 
-        Exception lastException = null;
+        SshResult lastFailure = null;
         for (SshHost host : shuffled) {
             try {
-                SshResult result = executeCommand(host, command, timeoutMs);
-                // 命令本身执行失败（如 docker service 不存在）不算连接故障，直接返回
-                if (result.getExitCode() >= 0) {
+                SshResult result = captureTaskLog
+                        ? executeCommand(host, command, timeoutMs)
+                        : executeCommandQuiet(host, command, timeoutMs);
+                // 只有命令启动前的连接失败才允许换节点；超时或启动后的异常不可重放写命令。
+                if (!result.isConnectionFailure()) {
                     return result;
                 }
+                lastFailure = result;
+                log.warn("节点 {} 连接失败，尝试下一个: {}", host.getKey(), result.getStderr());
             } catch (Exception e) {
                 log.warn("节点 {} 执行命令失败，尝试下一个: {}", host.getKey(), e.getMessage());
-                lastException = e;
+                lastFailure = SshResult.connectionFailure(e.getMessage());
                 invalidateSession(host);
             }
         }
 
         String errMsg = "所有 SSH 节点执行命令失败，已尝试: " + hosts.size() + " 个节点";
-        if (lastException != null) {
-            errMsg += "，最后错误: " + lastException.getMessage();
+        if (lastFailure != null && lastFailure.getStderr() != null
+                && !lastFailure.getStderr().trim().isEmpty()) {
+            errMsg += "，最后错误: " + lastFailure.getStderr().trim();
         }
-        return new SshResult(-1, "", errMsg);
+        return SshResult.connectionFailure(errMsg);
     }
 
     /**

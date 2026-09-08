@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import SparkLine from './SparkLine.vue'
 import MetricBar from './MetricBar.vue'
 import { getHostMetrics, getHostReplicas } from '@/api/monitor'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -14,6 +15,8 @@ const props = defineProps({
     default: null
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['update:visible'])
 
@@ -281,6 +284,7 @@ function replicaLevelClass(v) {
   justify-content: center;
   z-index: 10000;
   padding: 1rem;
+  overscroll-behavior: none;
 }
 
 .dialog-container {
@@ -371,6 +375,7 @@ function replicaLevelClass(v) {
 .dialog-body {
   padding: 1.5rem 1.75rem;
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1;
   display: flex;
   flex-direction: column;

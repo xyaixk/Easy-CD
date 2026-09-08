@@ -82,7 +82,8 @@ const getIcon = () => {
 
 <style scoped>
 .toast {
-  min-width: 320px;
+  width: min(100%, 500px);
+  min-width: 0;
   max-width: 500px;
   padding: 1rem 1.5rem;
   background: white;
@@ -92,6 +93,7 @@ const getIcon = () => {
   align-items: center;
   gap: 0.75rem;
   border-left: 4px solid;
+  pointer-events: auto;
 }
 
 .toast-success {
@@ -135,9 +137,11 @@ const getIcon = () => {
 
 .toast-message {
   flex: 1;
+  min-width: 0;
   color: var(--text-primary);
   font-size: 0.9rem;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .toast-close {
@@ -173,5 +177,13 @@ const getIcon = () => {
 .toast-leave-to {
   opacity: 0;
   transform: translateY(-20px);
+}
+
+@media (max-width: 480px) {
+  .toast {
+    padding: 0.75rem 1rem;
+    gap: 0.5rem;
+    border-radius: 10px;
+  }
 }
 </style>

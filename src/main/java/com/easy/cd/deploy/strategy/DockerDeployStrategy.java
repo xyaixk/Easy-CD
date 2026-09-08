@@ -46,10 +46,15 @@ public class DockerDeployStrategy implements DeployStrategy {
     private final EnvironmentMapper environmentMapper;
     private final ServiceMapper serviceMapper;
     private final SshExecutor sshExecutor;
+    private final DockerServiceConvergenceMonitor convergenceMonitor;
 
-    /** 写操作（create/update/rm/pull）SSH 超时，队列内后台执行可放宽；只读命令仍用默认 30s */
+    /** 常规写操作（create/update/rm）SSH 超时；镜像拉取使用独立的硬超时。 */
     @Value("${deploy.ssh-timeout-ms:600000}")
     private int writeSshTimeoutMs;
+
+    /** 部署前单次镜像拉取的硬超时；失败后由用户重新提交，不在后台重复拉取。 */
+    @Value("${deploy.image-pull-timeout-ms:180000}")
+    private int imagePullTimeoutMs;
 
     private RestTemplate restTemplate;
     {
@@ -595,7 +600,9 @@ public class DockerDeployStrategy implements DeployStrategy {
     private void createServiceViaCli(List<SshHost> sshHosts, String serviceName, String imageName,
                                      DeployRequest request, Map<String, Object> envConfig,
                                      Map<String, Object> dockerParams, Environment environment) {
-        StringBuilder cmd = new StringBuilder("docker service create");
+        pullImageOrThrow(sshHosts, imageName);
+
+        StringBuilder cmd = new StringBuilder("docker service create --detach --with-registry-auth");
         cmd.append(" --name ").append(serviceName);
 
         boolean isGlobal = "global".equalsIgnoreCase(request.getServiceMode());
@@ -632,6 +639,14 @@ public class DockerDeployStrategy implements DeployStrategy {
         if (!result.isSuccess()) {
             throw new RuntimeException("创建服务失败: " + result.getStderr());
         }
+
+        DockerServiceConvergenceMonitor.ConvergenceResult convergence =
+                convergenceMonitor.awaitDeployment(sshHosts, serviceName, imageName,
+                        null, Collections.emptySet());
+        if (!convergence.isSuccess()) {
+            String compensation = removeFailedService(sshHosts, serviceName);
+            throw new RuntimeException("服务创建未收敛: " + convergence.getMessage() + "；" + compensation);
+        }
     }
 
     private void updateServiceViaCli(List<SshHost> sshHosts, String serviceName, String imageName,
@@ -639,16 +654,30 @@ public class DockerDeployStrategy implements DeployStrategy {
         // 先 inspect 拿到当前 Swarm 上的实际配置，作为 diff 基准
         Map<String, Object> oldParams = inspectCurrentDockerParams(sshHosts, serviceName);
         String currentImage = inspectCurrentImage(sshHosts, serviceName);
+        if (currentImage == null || currentImage.trim().isEmpty()) {
+            throw new RuntimeException("读取当前服务镜像失败，已取消更新: " + serviceName);
+        }
 
         // 仅在镜像地址真的变化时才 pull，避免仅编辑配置时意外刷新 latest
-        if (!sameImage(currentImage, imageName)) {
+        boolean imageChanged = !sameImage(currentImage, imageName);
+        if (imageChanged) {
             log.info("镜像变更[{} → {}]，拉取新镜像", currentImage, imageName);
-            sshExecutor.executeCommandWithFailover(sshHosts, "docker pull " + imageName, writeSshTimeoutMs);
+            pullImageOrThrow(sshHosts, imageName);
         } else {
             log.info("镜像未变更，跳过 docker pull: {}", imageName);
         }
 
-        StringBuilder cmd = new StringBuilder("docker service update");
+        Set<String> baselineTaskIds = convergenceMonitor.captureTaskIds(sshHosts, serviceName);
+        Map<String, Object> effectiveParams = new LinkedHashMap<>();
+        if (newParams != null) {
+            effectiveParams.putAll(newParams);
+        }
+        if (imageChanged) {
+            // 镜像更新在 Swarm 侧启用自动回滚，后端失联时仍能保护旧版本。
+            effectiveParams.put("update_failure_action", "rollback");
+        }
+
+        StringBuilder cmd = new StringBuilder("docker service update --detach --with-registry-auth");
         cmd.append(" --image ").append(imageName);
 
         if (request.getReplicas() != null && request.getReplicas() > 0) {
@@ -656,7 +685,7 @@ public class DockerDeployStrategy implements DeployStrategy {
         }
 
         // diff 方式拼接 flag：仅对变化项发送 -add/-rm 或覆盖，旧有新无恢复默认
-        appendDiffFlags(cmd, oldParams, newParams);
+        appendDiffFlags(cmd, oldParams, effectiveParams);
 
         cmd.append(" --force");
         cmd.append(" ").append(serviceName);
@@ -668,6 +697,65 @@ public class DockerDeployStrategy implements DeployStrategy {
         if (result.hasOutput()) {
             log.info("docker service update 输出: {}", result.getStdout().trim());
         }
+
+        DockerServiceConvergenceMonitor.ConvergenceResult convergence =
+                convergenceMonitor.awaitDeployment(sshHosts, serviceName, imageName,
+                        currentImage, baselineTaskIds);
+        if (convergence.isSuccess()) {
+            return;
+        }
+        if (convergence.isRolledBack()) {
+            throw new RuntimeException("服务更新未收敛: " + convergence.getMessage());
+        }
+
+        String compensation = rollbackFailedUpdate(sshHosts, serviceName, currentImage);
+        throw new RuntimeException("服务更新未收敛: " + convergence.getMessage() + "；" + compensation);
+    }
+
+    private void pullImageOrThrow(List<SshHost> sshHosts, String imageName) {
+        log.info("部署前拉取镜像: {}", imageName);
+        SshResult result = sshExecutor.executeCommandWithFailover(
+                sshHosts, "docker pull " + imageName, imagePullTimeoutMs);
+        if (result == null || !result.isSuccess()) {
+            throw new RuntimeException("镜像拉取失败[" + imageName + "]: " + commandError(result));
+        }
+    }
+
+    private String removeFailedService(List<SshHost> sshHosts, String serviceName) {
+        SshResult remove = sshExecutor.executeCommandWithFailover(
+                sshHosts, "docker service rm " + serviceName, writeSshTimeoutMs);
+        boolean removed = convergenceMonitor.awaitRemoval(sshHosts, serviceName);
+        if (removed) {
+            return "已删除失败服务";
+        }
+        return "删除失败服务未完成: " + commandError(remove);
+    }
+
+    private String rollbackFailedUpdate(List<SshHost> sshHosts, String serviceName, String previousImage) {
+        SshResult rollback = sshExecutor.executeCommandWithFailover(
+                sshHosts, "docker service update --rollback --detach " + serviceName, writeSshTimeoutMs);
+        if (rollback == null || !rollback.isSuccess()) {
+            return "回滚命令失败: " + commandError(rollback);
+        }
+        DockerServiceConvergenceMonitor.ConvergenceResult convergence =
+                convergenceMonitor.awaitRollback(sshHosts, serviceName, previousImage);
+        if (convergence.isSuccess()) {
+            return "已回滚到原服务版本";
+        }
+        return "回滚未收敛: " + convergence.getMessage();
+    }
+
+    private String commandError(SshResult result) {
+        if (result == null) {
+            return "未返回执行结果";
+        }
+        if (result.getStderr() != null && !result.getStderr().trim().isEmpty()) {
+            return result.getStderr().trim();
+        }
+        if (result.getStdout() != null && !result.getStdout().trim().isEmpty()) {
+            return result.getStdout().trim();
+        }
+        return "exitCode=" + result.getExitCode();
     }
 
     /** 拉取当前服务的镜像地址（形如 host/repo:tag 或额外带 @sha256:...） */

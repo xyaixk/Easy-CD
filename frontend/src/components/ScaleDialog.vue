@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 const props = defineProps({
   visible: {
@@ -11,6 +12,8 @@ const props = defineProps({
     required: true
   }
 })
+
+useBodyScrollLock(() => props.visible)
 
 const emit = defineEmits(['confirm', 'cancel', 'update:visible'])
 
@@ -179,14 +182,18 @@ const validateInput = (e) => {
   justify-content: center;
   z-index: 100000;
   backdrop-filter: blur(4px);
+  padding: 1rem;
 }
 
 .confirm-dialog {
   background: var(--bg-secondary);
   border-radius: 12px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
-  min-width: 450px;
-  max-width: 90vw;
+  width: 450px;
+  min-width: 0;
+  max-width: 100%;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
   animation: slideIn 0.3s ease;
 }
 
@@ -351,5 +358,50 @@ const validateInput = (e) => {
 .dialog-enter-from,
 .dialog-leave-to {
   opacity: 0;
+}
+
+@media (max-width: 480px) {
+  .confirm-dialog-overlay {
+    padding: 0.5rem;
+  }
+
+  .confirm-dialog {
+    max-height: calc(100vh - 1rem);
+  }
+
+  .dialog-header {
+    padding: 0.875rem 1rem 0.75rem;
+  }
+
+  .dialog-body {
+    padding: 1.5rem 1rem;
+  }
+
+  .replica-control {
+    gap: 0.75rem;
+  }
+
+  .scale-number {
+    width: 68px;
+    height: 46px;
+    font-size: 1.5rem;
+  }
+
+  .scale-arrow svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .dialog-footer {
+    padding: 0.75rem 1rem 1rem;
+    gap: 0.75rem;
+  }
+
+  .btn-cancel,
+  .btn-confirm {
+    flex: 1;
+    min-width: 0;
+    padding: 0.625rem 0.75rem;
+  }
 }
 </style>

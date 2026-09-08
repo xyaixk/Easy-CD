@@ -1,6 +1,7 @@
 <script setup>
 import { ref, watch } from 'vue'
 import { fetchContext } from '@/api/logs'
+import { useBodyScrollLock } from '@/composables/useBodyScrollLock'
 
 // anchor 为日志行对象（需 containerName + tsNanos）
 const props = defineProps({
@@ -8,6 +9,7 @@ const props = defineProps({
   envId: { type: Number, default: null },
   anchor: { type: Object, default: null }
 })
+useBodyScrollLock(() => props.visible)
 const emit = defineEmits(['update:visible'])
 
 const isLoading = ref(false)
